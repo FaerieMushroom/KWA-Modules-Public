@@ -20,6 +20,15 @@
       ]
     },
     {
+      "slug": "SixtyFourGatePitchSeqKnobs",
+      "name": "KWA Pitch 64 Knobs",
+      "description": "64 step pitch / velocity / trigger sequencer with a knob and LED per step - click the centre LED to enable or disable a step",
+      "keywords": "gate ctrl",
+      "tags": [
+        "Sequencer"
+      ]
+    },
+    {
       "slug": "SixtyFourGatePitchSeqExpander",
       "name": "KWA Pitch 64 Expander",
       "description": "Expander for pitch 64",

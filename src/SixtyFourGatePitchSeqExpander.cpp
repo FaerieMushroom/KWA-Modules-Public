@@ -79,7 +79,9 @@ struct SixtyFourGatePitchSeqExpander : Module {
 		lights[CUT_LIGHT].setBrightness(params[CUT_BUTTON_PARAM].getValue());
 		lights[PASTE_LIGHT].setBrightness(params[PASTE_BUTTON_PARAM].getValue());
 
-		const bool is_momma = rightExpander.module && (rightExpander.module->model == modelSixtyFourGatePitchSeq);
+		// Both main modules use the same expander messages
+		const bool is_momma = rightExpander.module && (rightExpander.module->model == modelSixtyFourGatePitchSeq
+			|| rightExpander.module->model == modelSixtyFourGatePitchSeqKnobs);
 		
 		// Read right expander message
 		if (is_momma) {

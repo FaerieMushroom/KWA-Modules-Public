@@ -7,6 +7,7 @@ extern Plugin *pluginInstance;
 
 // Declare each Model, defined in each module source file
 extern Model *modelSixtyFourGatePitchSeq;
+extern Model *modelSixtyFourGatePitchSeqKnobs;
 extern Model *modelEightGateSequencer;
 extern Model *modelEightGateSequencerChild;
 extern Model *modelSequencerController;
