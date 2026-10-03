@@ -42,11 +42,14 @@ three modes, same expander messages - only the 64 square buttons became knobs.
 Works with the KWA Pitch 64 Expander on either side, the same way the KWA Pitch 64 does - **Run**, **One Shot**, **Step Mode**, **Page**, **Step Count** CV and the **Copy** / **Cut** / **Paste** buttons all behave as they do with the original. The expander's **Data 1** / **Data 2** outputs carry the data buses of the step that is playing.
 - **Playhead** A green glow behind a step button marks the step that is playing.
 - **Display knob** Decides what the knobs address, and re-snap all 64 knobs to that source the moment you change it
-  - **Gates** - knobs address V/Oct
-  - **V/Oct** - knobs address V/Oct, LEDs go red (low) to green (high)
+  - **Probability** - each knob is a chance of that step firing, 1 is always and 0 is never, linear in between. Blue brightness shows the chance. These knobs always run 0 to 10, whatever the Knob Range is set to
+  - **V/Oct** - knobs address V/Oct, LEDs go red at the bottom of the range to green at the top
   - **Velocity** - knobs address velocity, LEDs go dim red to bright red
-  - **Data 1** / **Data 2** - knobs address the data buses, which are also what the expander's data outputs send
-- **Knob Range** Right click the module to switch the step knobs between -10 to 10 (the default, for bipolar signals) and 0 to 10. Velocity and the data buses are unipolar, so switch to 0 to 10 when editing those.
+  - **Data 1** / **Data 2** - knobs address the data buses (cyan and magenta), which are also what the expander's data outputs send
+- **Every step starts on.** A fresh module, and Rack's initialize, leaves all 64 steps enabled with a note slot ready and a chance of firing, so it runs as soon as you patch a clock and a gate. Mute the steps you don't want, or pull the Steps knob down to only play the first few.
+- **Probability** A step fires with a chance of `knob / 10`, so a knob at full brightness is a certainty and one at zero never fires. The roll happens once per trigger on the clock and on reset. One probability per step is shared by every voice. While the display is on Probability the knob tooltips read as a percentage, and you can type one into the context menu, rather than as volts.
+- **Colours are absolute** A value always gets the same colour, no matter what else is on the matrix. Nothing is normalised against the other steps, so two patches never disagree about what a colour means.
+- **Knob Range** Right click the module to switch the step knobs between -10 to 10 (the default, for bipolar signals) and 0 to 10. Velocity and the data buses are unipolar, so switch to 0 to 10 when editing those. The range only rescales the colours, never the knob positions - turning a knob always writes the value its pointer is on.
 - **Recording** Identical to the button version. Arm **Record**, the gate writes onto the step the playhead is on, and the knob of that step moves to whatever arrived on the patched inputs.
 
 Knobs read and write the first channel of each step, so with a mono signal every step is directly editable.

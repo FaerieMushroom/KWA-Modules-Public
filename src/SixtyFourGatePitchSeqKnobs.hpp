@@ -49,21 +49,24 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 	dsp::PulseGenerator clockOutputPulse;
 	dsp::PulseGenerator eocOutputPulse;
 
-	//State vars
-	float voctPCV[10][16][64] = {0.f};
-	float velocityPCV[10][16][64] = {0.f};
-	float gatePCV[10][16][64] = {0.f};
-	float hasRecordedDataPCV[10][16][64] = {0.f};
-	float dataOnePCV[10][16][64] = {0.f};
-	float dataTwoPCV[10][16][64] = {0.f};
+	//State vars. Mono by design, so these are page then step - there is no voice axis.
+	float voctPCV[10][64] = {0.f};
+	float velocityPCV[10][64] = {0.f};
+	float gatePCV[10][64] = {0.f};
+	float hasRecordedDataPCV[10][64] = {0.f};
+	float dataOnePCV[10][64] = {0.f};
+	float dataTwoPCV[10][64] = {0.f};
+	// Chance a step fires, stored on the same 0..10 scale as everything else so 10.f is
+	// always and 0.f is never. Defaults to always.
+	float probabilityPCV[10][64];
 
-	float voctCopy[16] = {0.f};
-	float velocityCopy[16] = {0.f};
-	bool gateCopy[16] = {false};
-	bool hasRecordedDataCopy[16] = {false};
-	float dataOneCopy[16] = {0.f};
-	float dataTwoCopy[16] = {0.f};
-	bool selectionCopy[16] = {false};
+	float voctCopy = 0.f;
+	float velocityCopy = 0.f;
+	bool gateCopy = false;
+	bool hasRecordedDataCopy = false;
+	float dataOneCopy = 0.f;
+	float dataTwoCopy = 0.f;
+	bool selectionCopy = false;
 
 	int currentStep = 0;
 	int currentSubstep = 0;
@@ -74,6 +77,8 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 	int sequencePage = 0;
 	int stepCountInt = 0;
 	int pingPongDir = 1;
+	// Probability roll result for the step the playhead is on, for the playhead light
+	bool currentStepFired = true;
 
 	bool gateModeSelected = false;
 	bool isRecording = false;
@@ -108,14 +113,6 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 	float expanderSignalCopy = 0.f;
 	float expanderSignalCut = 0.f;
 	float expanderSignalPaste = 0.f;
-	float maxVoct = -10.f;
-	float minVoct = 10.f;
-	float maxVel = -10.f;
-	float minVel = 10.f;
-	float maxDataOne = -10.f;
-	float minDataOne = 10.f;
-	float maxDataTwo = -10.f;
-	float minDataTwo = 10.f;
 
 	float leftMessages[2][10] = {};
 	float rightMessages[2][10] = {};
@@ -127,28 +124,48 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 		bool gateFellThisSample = false;
 		bool gateRoseThisSample = false;
 		bool voctMovedThisSample = false;
+		// The step the cached probability roll belongs to, -1 when nothing is cached.
+		// Rolling once per step and remembering it is what keeps the trigger and any data
+		// written for that step agreeing on the same result.
+		int rolledStep = -1;
+		bool rolledResult = false;
 		dsp::PulseGenerator triggerOutputPulse;
 	};
-	Engine engines[16];
+	Engine engine;
 
 	SixtyFourGatePitchSeqKnobs();
 
 	void process(const ProcessArgs& args) override;
 
-	void processFifty(const ProcessArgs& args, int channels);
+	void processFifty(const ProcessArgs& args);
 
 	void setModeBrightnesses();
 
-	void updateDisplay(int channels);
+	void updateDisplay();
 
-	void clearNoteParams(int i, int channel);
+	void clearNoteParams(int i);
 
 	/** Value the step knobs currently address: 1 and 2 edit V/Oct, 3 velocity, 4/5 the data buses. */
 	int getDataSource();
 
 	float getKnobMin();
 
-	/** Channel 0 slot that the step knobs read from and write to. */
+	/** Bottom of the step knob range. Probability is always 0 to 10, whatever the
+	context menu range is set to. */
+	float knobRangeMin();
+
+	/** Rolls the step's trigger. A step fires with a chance of probability / 10. */
+	bool rollTrigger(int step);
+
+	/** Whether a step fires: it has to be enabled, and it has to pass its probability
+	roll. Rolled once per step and cached, so the trigger output and any data written for
+	that step always share one result. A step clicked off never fires. */
+	bool stepFires(int step);
+
+	/** Forgets the cached rolls, so a changed probability or gate takes effect at once. */
+	void invalidateStepRolls();
+
+	/** Slot that the step knobs read from and write to. */
 	float* stepValuePtr(int i);
 
 	void syncKnob(int i);
@@ -167,11 +184,11 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 
 	void onRandomize(const RandomizeEvent& e) override;
 
-	void copyNotes(int channels, bool cut = false);
+	void copyNotes(bool cut = false);
 
-	void cutNotes(int channels);
+	void cutNotes();
 
-	void pasteNotes(int channels);
+	void pasteNotes();
 
 };
 

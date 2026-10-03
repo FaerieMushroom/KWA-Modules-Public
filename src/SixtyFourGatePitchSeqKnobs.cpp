@@ -10,11 +10,57 @@ static const float SHADE_BUTTON_OUT_OF_RANGE = 0.93f;
 //// MODULE
 ////////////////
 
+/** A step knob's value. While the display is on Probability the knob is a chance of the
+step firing, so it is shown and typed as a percentage instead of as volts. */
+struct StepKnobQuantity : engine::ParamQuantity {
+	SixtyFourGatePitchSeqKnobs* getSeq() {
+		return dynamic_cast<SixtyFourGatePitchSeqKnobs*>(this->module);
+	}
+	bool isProbability() {
+		SixtyFourGatePitchSeqKnobs* seq = getSeq();
+		return seq && seq->getDataSource() == 1;
+	}
+	/** Stored on the usual 0 to 10 scale, which is 0% to 100% */
+	float getPercent() {
+		return math::clamp(getValue() * 10.f, 0.f, 100.f);
+	}
+	std::string getDisplayValueString() override {
+		if (!isProbability())
+			return engine::ParamQuantity::getDisplayValueString();
+		return string::f("%.0f %%", getPercent());
+	}
+	std::string getString() override {
+		if (!isProbability() || name == "")
+			return engine::ParamQuantity::getString();
+		return string::f("%s %s", name.c_str(), getDisplayValueString().c_str());
+	}
+	void setDisplayValueString(std::string s) override {
+		if (!isProbability()) {
+			engine::ParamQuantity::setDisplayValueString(s);
+			return;
+		}
+		// Accepts "80" or "80%"
+		while (!s.empty() && (s.back() == '%' || s.back() == ' '))
+			s.pop_back();
+		setValue(std::round(std::atof(s.c_str()) * 0.1f));
+	}
+};
+
 SixtyFourGatePitchSeqKnobs::SixtyFourGatePitchSeqKnobs() {
 	//knobs
 	config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
+	// Every step fires unless a knob says otherwise
+	std::fill(&probabilityPCV[0][0], &probabilityPCV[0][0] + (10 * 64), 10.f);
+	// Every step starts enabled with a note slot ready, so the sequencer runs out of the box
+	std::fill(&gatePCV[0][0], &gatePCV[0][0] + (10 * 64), 10.f);
+	std::fill(&hasRecordedDataPCV[0][0], &hasRecordedDataPCV[0][0] + (10 * 64), 10.f);
 	for (int i = 0; i < 64; i++) {
-		configParam(STEP_KNOB_PARAMS + i, -10.f, 10.f, 0.f, string::f("Step %d V/Oct", i + 1), "V");
+		StepKnobQuantity* q = configParam<StepKnobQuantity>(STEP_KNOB_PARAMS + i, -10.f, 10.f, 0.f, string::f("Step %d V/Oct", i + 1), "V");
+		// Rack smooths a param towards a target and getValue() reports the target, while
+		// getImmediateValue() reports the interpolated value. With 64 knobs sharing one
+		// smoothing slot that reads back as noise, and feeding it back into the step data
+		// would drag stored values around. Keep these exact.
+		q->smoothEnabled = false;
 		//buttons - the middle of each knob
 		configButton(STEP_BUTTON_PARAMS + i, string::f("Step %d", i + 1));
 	}
@@ -23,7 +69,7 @@ SixtyFourGatePitchSeqKnobs::SixtyFourGatePitchSeqKnobs() {
 	configSwitch(GATE_MODE_PARAM, 0.f, 10.f, 10.f, "Gate Mode");
 
 	//knobs
-	configSwitch(DISPLAY_MODE_PARAM, 1.f, 5.f, 2.f, "Display Mode", {"Gates", "V/Oct", "Velocity", "Data 1", "Data 2"});
+	configSwitch(DISPLAY_MODE_PARAM, 1.f, 5.f, 2.f, "Display Mode", {"Probability", "V/Oct", "Velocity", "Data 1", "Data 2"});
 	getParamQuantity(DISPLAY_MODE_PARAM)->snapEnabled = true;
 	configParam(STEP_COUNT_PARAM, 1.f, 64.f, 8.f, "Steps");
 	getParamQuantity(STEP_COUNT_PARAM)->snapEnabled = true;
@@ -67,30 +113,59 @@ float SixtyFourGatePitchSeqKnobs::getKnobMin() {
 	return params[KNOB_RANGE_PARAM].getValue() > 0.5f ? 0.f : -10.f;
 }
 
+float SixtyFourGatePitchSeqKnobs::knobRangeMin() {
+	// Probability is a chance, so it is always 0 to 10 whatever the knob range is set to
+	if (getDataSource() == 1)
+		return 0.f;
+	return getKnobMin();
+}
+
 float* SixtyFourGatePitchSeqKnobs::stepValuePtr(int i) {
 	switch (getDataSource()) {
-		case 3: return (float*)&velocityPCV[sequencePage][0][i];
-		case 4: return (float*)&dataOnePCV[sequencePage][0][i];
-		case 5: return (float*)&dataTwoPCV[sequencePage][0][i];
-		default: return (float*)&voctPCV[sequencePage][0][i];
+		case 1: return &probabilityPCV[sequencePage][i];
+		case 3: return &velocityPCV[sequencePage][i];
+		case 4: return &dataOnePCV[sequencePage][i];
+		case 5: return &dataTwoPCV[sequencePage][i];
+		default: return &voctPCV[sequencePage][i];
 	}
+}
+
+bool SixtyFourGatePitchSeqKnobs::rollTrigger(int step) {
+	const float chance = math::clamp(probabilityPCV[sequencePage][step] * 0.1f, 0.f, 1.f);
+	return random::uniform() < chance;
+}
+
+bool SixtyFourGatePitchSeqKnobs::stepFires(int step) {
+	if (step < 0 || step >= 64)
+		return false;
+	if (engine.rolledStep != step) {
+		engine.rolledStep = step;
+		// A step the user clicked off never fires, whatever its probability says
+		engine.rolledResult = gatePCV[sequencePage][step] > 0.1f && rollTrigger(step);
+	}
+	return engine.rolledResult;
+}
+
+void SixtyFourGatePitchSeqKnobs::invalidateStepRolls() {
+	engine.rolledStep = -1;
 }
 
 void SixtyFourGatePitchSeqKnobs::syncKnob(int i) {
 	if (i < 0 || i >= 64)
 		return;
 	ParamQuantity* quantity = getParamQuantity(STEP_KNOB_PARAMS + i);
-	const float lo = getKnobMin();
+	const float lo = knobRangeMin();
 	quantity->minValue = lo;
 	quantity->maxValue = 10.f;
-	quantity->setValue(math::clamp(*stepValuePtr(i), lo, 10.f));
-	knobEcho[i] = quantity->getValue();
+	quantity->setImmediateValue(math::clamp(*stepValuePtr(i), lo, 10.f));
+	knobEcho[i] = quantity->getImmediateValue();
 }
 
 void SixtyFourGatePitchSeqKnobs::updateKnobLabels() {
 	const int mode = getDataSource();
-	const char* what = "V/Oct";
-	if (mode == 3) what = "Velocity";
+	const char* what = "Probability";
+	if (mode == 2) what = "V/Oct";
+	else if (mode == 3) what = "Velocity";
 	else if (mode == 4) what = "Data 1";
 	else if (mode == 5) what = "Data 2";
 	for (int i = 0; i < 64; i++) {
@@ -107,31 +182,34 @@ void SixtyFourGatePitchSeqKnobs::syncKnobs() {
 }
 
 void SixtyFourGatePitchSeqKnobs::pullKnobs() {
-	const float lo = getKnobMin();
+	const float lo = knobRangeMin();
 	for (int i = 0; i < 64; i++) {
 		ParamQuantity* quantity = getParamQuantity(STEP_KNOB_PARAMS + i);
-		const float knobValue = quantity->getValue();
+		// Immediate value, so what is stored on the step is exactly what the knob is on
+		const float knobValue = quantity->getImmediateValue();
 		if (knobValue == knobEcho[i])
 			continue;
 		// The knob was turned, so write it back into the step it addresses
 		knobEcho[i] = knobValue;
 		*stepValuePtr(i) = math::clamp(knobValue, lo, 10.f);
+		// A turned probability knob has to take effect on the next visit, not the one after
+		invalidateStepRolls();
 		shouldRefreshDisplay = true;
 	}
 }
 
 void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
-	//channels
-	int channels = std::min(std::max(inputs[GATE_INPUT].getChannels(), 1), 16);
+	// Mono by design. A knob sequencer steps as one voice, so polyphony would only carry
+	// sixteen copies of data nothing reads. Gate channels past the first are ignored.
 	//less often process - for sample insensitive code
 	if (processCounter >= 49) {
-		processFifty(args, channels);
+		processFifty(args);
 		processCounter = 0;
 	}
 	processCounter++;
-	outputs[GATE_OUTPUT].setChannels(channels);
-	outputs[VOCT_OUTPUT].setChannels(channels);
-	outputs[VELOCITY_OUTPUT].setChannels(channels);
+	outputs[GATE_OUTPUT].setChannels(1);
+	outputs[VOCT_OUTPUT].setChannels(1);
+	outputs[VELOCITY_OUTPUT].setChannels(1);
 
 	// Read left expander messages
 	const bool is_baby = leftExpander.module && (leftExpander.module->model == modelSixtyFourGatePitchSeqExpander);
@@ -163,8 +241,8 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		float* leftSendMessage = (float*)leftExpander.module->rightExpander.producerMessage;
 		// Data one and two of the step that is playing, so the expander's data outs are live
 		const int sentStep = currentStep < 64 ? currentStep : 0;
-		leftSendMessage[0] = dataOnePCV[sequencePage][0][sentStep];
-		leftSendMessage[1] = dataTwoPCV[sequencePage][0][sentStep];
+		leftSendMessage[0] = dataOnePCV[sequencePage][sentStep];
+		leftSendMessage[1] = dataTwoPCV[sequencePage][sentStep];
 		// Flip messages at the end of the timestep
 		leftExpander.module->rightExpander.messageFlipRequested = true;
 	}
@@ -188,43 +266,37 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 
 	// Playback other voltages
 	if (currentStep < 64) {
-		for (int c = 0; c < channels; c++) {
-			if(hasRecordedDataPCV[sequencePage][c][currentStep] > 0 && !(inputs[GATE_INPUT].getVoltage(c) > 0)){
-				outputs[VOCT_OUTPUT].setVoltage(voctPCV[sequencePage][c][currentStep], c);
-				outputs[VELOCITY_OUTPUT].setVoltage(velocityPCV[sequencePage][c][currentStep], c);
-			}
+		if(hasRecordedDataPCV[sequencePage][currentStep] > 0 && !(inputs[GATE_INPUT].getVoltage() > 0)){
+			outputs[VOCT_OUTPUT].setVoltage(voctPCV[sequencePage][currentStep]);
+			outputs[VELOCITY_OUTPUT].setVoltage(velocityPCV[sequencePage][currentStep]);
 		}
 	}
 
 	// Gate Rise + Fall
-	for (int c = 0; c < channels; c++) {
-		engines[c].gateFellThisSample = false;
-		engines[c].gateRoseThisSample = false;
-		float gateVoltage = inputs[GATE_INPUT].getVoltage(c);
-				// HIGH to LOW
-			if (engines[c].isGateHigh) {
-				if (gateVoltage <= 0.1f) {
-					engines[c].isGateHigh = false;
-					engines[c].gateFellThisSample = true;
-				}
+	engine.gateFellThisSample = false;
+	engine.gateRoseThisSample = false;
+	float gateVoltage = inputs[GATE_INPUT].getVoltage();
+			// HIGH to LOW
+		if (engine.isGateHigh) {
+			if (gateVoltage <= 0.1f) {
+				engine.isGateHigh = false;
+				engine.gateFellThisSample = true;
 			}
-			else {
-				// LOW to HIGH
-				if (gateVoltage >= 2.f) {
-					engines[c].isGateHigh = true;
-					engines[c].gateRoseThisSample = true;
-				}
+		}
+		else {
+			// LOW to HIGH
+			if (gateVoltage >= 2.f) {
+				engine.isGateHigh = true;
+				engine.gateRoseThisSample = true;
 			}
-	}
+		}
 
 	// Voct Movement Detection
-	for (int c = 0; c < channels; c++) {
-		engines[c].voctMovedThisSample = false;
-		float newVoctVoltage = inputs[VOCT_INPUT].getVoltage(c);
-		if ((newVoctVoltage != engines[c].voctVoltage) && engines[c].isGateHigh){
-			engines[c].voctMovedThisSample = true;
-			engines[c].voctVoltage = newVoctVoltage;
-		}
+	engine.voctMovedThisSample = false;
+	float newVoctVoltage = inputs[VOCT_INPUT].getVoltage();
+	if ((newVoctVoltage != engine.voctVoltage) && engine.isGateHigh){
+		engine.voctMovedThisSample = true;
+		engine.voctVoltage = newVoctVoltage;
 	}
 
 	// Reset - Schmitt trigger
@@ -245,12 +317,14 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		shouldRefreshDisplay = true;
 		resetTriggeredInternally = true;
 		// Pulse outputs if gate on reset step
-		for (int c = 0; c < channels; c++) {
-			engines[c].hasTriggerOutputPulsedThisStep = false;
-			if(currentStep < 64 && gatePCV[sequencePage][c][currentStep] > 0){
-				engines[c].triggerOutputPulse.trigger(1e-3f);
-				engines[c].hasTriggerOutputPulsedThisStep = true;
-			}
+		currentStepFired = true;
+		engine.hasTriggerOutputPulsedThisStep = false;
+		if (currentStep < 64) {
+			engine.hasTriggerOutputPulsedThisStep = true;
+			if (stepFires(currentStep))
+				engine.triggerOutputPulse.trigger(1e-3f);
+			else
+				currentStepFired = false;
 		}
 	}
 
@@ -285,9 +359,7 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		//Substep loop
 		const int playheadModeInt = std::floor(expanderSignalPlayhead);
 		if (currentSubstep >= 4){
-			for (int c = 0; c < channels; c++) {
-				engines[c].hasTriggerOutputPulsedThisStep = false;
-			}
+			engine.hasTriggerOutputPulsedThisStep = false;
 			if(is_baby ? expanderSignalPlay > 0.f : true) {
 				switch(playheadModeInt){
 					default:
@@ -364,14 +436,15 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 						break;
 				}
 				//Pulse outputs if gate
+				currentStepFired = true;
 				if (currentStep < 64) {
-					for (int c = 0; c < channels; c++) {
-						if(gatePCV[sequencePage][c][currentStep] > 0){
-							if(!engines[c].hasTriggerOutputPulsedThisStep){
-								engines[c].triggerOutputPulse.trigger(1e-3f);
-								engines[c].hasTriggerOutputPulsedThisStep = true;
-							}
-						}
+					if(!engine.hasTriggerOutputPulsedThisStep){
+						engine.hasTriggerOutputPulsedThisStep = true;
+						// Rolled once per step, then reused by the data write further down
+						if(stepFires(currentStep))
+							engine.triggerOutputPulse.trigger(1e-3f);
+						else
+							currentStepFired = false;
 					}
 				}
 				currentSubstep = 0;
@@ -443,79 +516,81 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		shouldRefreshDisplay = true;
 	}
 
-	for (int c = 0; c < channels; c++) {
-		// On input gate rise
-		if ((engines[c].gateRoseThisSample || engines[c].voctMovedThisSample) && currentStep < 64)
+	// On input gate rise. Only a step that is enabled and actually fired takes data,
+	// so a step the user clicked off, or one that lost its probability roll, keeps
+	// exactly what it already had. When recordStep is the step that just fired this
+	// reuses that same roll, so a note can never fire without landing.
+	const int recordStep = currentWorkingStep < 64 ? currentWorkingStep : 0;
+	if ((engine.gateRoseThisSample || engine.voctMovedThisSample)
+		&& currentStep < 64
+		&& stepFires(recordStep))
+	{
+		// recording
+		if(isRecording)
 		{
-			// recording
-			if(isRecording)
-			{
-				if(editCount == 0) {
-					clearNoteParams(currentWorkingStep, channels);
-				}
-				// Increment edit count, To reset note params only once per step
-				editCount++;
+			if(editCount == 0) {
+				clearNoteParams(recordStep);
+			}
+			// Increment edit count, To reset note params only once per step
+			editCount++;
 
-				// Record Data
-				gatePCV[sequencePage][c][currentWorkingStep] = 10.f;
-				hasRecordedDataPCV[sequencePage][c][currentWorkingStep] = 10.f;
-				voctPCV[sequencePage][c][currentWorkingStep] = inputs[VOCT_INPUT].getVoltage(c);
-				velocityPCV[sequencePage][c][currentWorkingStep] = inputs[VELOCITY_INPUT].getVoltage(c);
+			// Record Data
+			gatePCV[sequencePage][recordStep] = 10.f;
+			hasRecordedDataPCV[sequencePage][recordStep] = 10.f;
+			voctPCV[sequencePage][recordStep] = inputs[VOCT_INPUT].getVoltage();
+			velocityPCV[sequencePage][recordStep] = inputs[VELOCITY_INPUT].getVoltage();
 
-				// The matching knob follows what was just recorded
-				syncKnob(currentWorkingStep);
+			// The matching knob follows what was just recorded
+			syncKnob(recordStep);
 
-			// in edit mode
-			} else if (!gateModeSelected)
-			{
-				// Iterate the step knobs
-				for (int i = 0; i < 64; i++) {
-					// If step is selected with edit mode
-					if(editModeSelectedGates[i]){
-						if(editCount == 0) {
-							// Subloop neccesary because edit count increments
-							for (int j = 0; j < 64; j++) {
-								if(editModeSelectedGates[j]){
-									clearNoteParams(j, channels);
-								}
+		// in edit mode
+		} else if (!gateModeSelected)
+		{
+			// Iterate the step knobs
+			for (int i = 0; i < 64; i++) {
+				// If step is selected with edit mode
+				if(editModeSelectedGates[i]){
+					if(editCount == 0) {
+						// Subloop neccesary because edit count increments
+						for (int j = 0; j < 64; j++) {
+							if(editModeSelectedGates[j]){
+								clearNoteParams(j);
 							}
 						}
-						// Edit Data
-						gatePCV[sequencePage][c][i] = 10.f;
-						hasRecordedDataPCV[sequencePage][c][i] = 10.f;
-						voctPCV[sequencePage][c][i] = inputs[VOCT_INPUT].getVoltage(c);
-						velocityPCV[sequencePage][c][i] = inputs[VELOCITY_INPUT].getVoltage(c);
-						// Increment edit count, To reset note params only once per edit
-						editCount++;
-						syncKnob(i);
 					}
+					// Edit Data
+					gatePCV[sequencePage][i] = 10.f;
+					hasRecordedDataPCV[sequencePage][i] = 10.f;
+					voctPCV[sequencePage][i] = inputs[VOCT_INPUT].getVoltage();
+					velocityPCV[sequencePage][i] = inputs[VELOCITY_INPUT].getVoltage();
+					// Increment edit count, To reset note params only once per edit
+					editCount++;
+					syncKnob(i);
 				}
-				// Start counting up clock steps again
-				clockStepsSinceLastEdit = 0;
 			}
+			// Start counting up clock steps again
+			clockStepsSinceLastEdit = 0;
 		}
 	}
 
-	for (int c = 0; c < channels; c++) {
-		if(engines[c].gateFellThisSample){
-			outputs[GATE_OUTPUT].setVoltage(0.f, c);
-		}
+	if(engine.gateFellThisSample){
+		outputs[GATE_OUTPUT].setVoltage(0.f);
 	}
 
 	// Output - pulses
-	for (int c = 0; c < channels; c++) {
-		outputs[GATE_OUTPUT].setVoltage((engines[c].triggerOutputPulse.process(args.sampleTime) ? 10.f : 0.f) > inputs[GATE_INPUT].getVoltage(c) ? 10.f : inputs[GATE_INPUT].getVoltage(c),c);
-	}
+	outputs[GATE_OUTPUT].setVoltage((engine.triggerOutputPulse.process(args.sampleTime) ? 10.f : 0.f) > inputs[GATE_INPUT].getVoltage() ? 10.f : inputs[GATE_INPUT].getVoltage());
 	outputs[RESET_OUTPUT].setVoltage(inputs[RESET_INPUT].getVoltage());
 	outputs[EOC_OUTPUT].setVoltage(eocOutputPulse.process(args.sampleTime) ? 10.f : 0.f);
 	outputs[CLOCK_OUTPUT].setVoltage(clockOutputPulse.process(args.sampleTime) ? 10.f : 0.f);
 
 }
 
-void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int channels){
+void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args){
 	if(!wasInitialized){
 		params[GATE_MODE_PARAM].setValue(10.f);
 		wasInitialized = true;
+		// Roll step 0 up front so the playhead is right before the clock ever runs
+		currentStepFired = stepFires(currentStep);
 		syncKnobs();
 		shouldRefreshDisplay = true;
 	}
@@ -566,7 +641,7 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 		if(!copyPressedDown){
 			//DEBUG("Copy pressed down");
 			copyPressedDown = true;
-			copyNotes(channels, false);
+			copyNotes(false);
 		}
 	} else {
 		copyPressedDown = false;
@@ -575,7 +650,7 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 		if(!cutPressedDown){
 			//DEBUG("Cut pressed down");
 			cutPressedDown = true;
-			cutNotes(channels);
+			cutNotes();
 		}
 	} else {
 		cutPressedDown = false;
@@ -584,7 +659,7 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 		if(!pastePressedDown){
 			//DEBUG("Paste pressed down");
 			pastePressedDown = true;
-			pasteNotes(channels);
+			pasteNotes();
 		}
 	} else {
 		pastePressedDown = false;
@@ -601,19 +676,11 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 				// Gates mode - mute or unmute this step only. Muting keeps the note data,
 				// so unmuting brings back exactly what was there before.
 				if (gateModeSelected) {
-					bool gateOn = false;
-					for (int c = 0; c < 16; c++) {
-						if (gatePCV[sequencePage][c][i] > 0.1f) {
-							gateOn = true;
-						}
-					}
-					if (gateOn) {
-						for (int c = 0; c < 16; c++) {
-							gatePCV[sequencePage][c][i] = 0.f;
-						}
+					if (gatePCV[sequencePage][i] > 0.1f) {
+						gatePCV[sequencePage][i] = 0.f;
 					} else {
-						gatePCV[sequencePage][0][i] = 10.f;
-						hasRecordedDataPCV[sequencePage][0][i] = 10.f;
+						gatePCV[sequencePage][i] = 10.f;
+						hasRecordedDataPCV[sequencePage][i] = 10.f;
 					}
 				}
 				// Edit mode - select or deselect this step only
@@ -623,6 +690,8 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 						anyPressed = true;
 					}
 				}
+				// The gate just changed, so a cached roll for that step is stale
+				invalidateStepRolls();
 				gateModifiedSinceRelease = true;
 			}
 		}
@@ -637,38 +706,34 @@ void SixtyFourGatePitchSeqKnobs::processFifty(const ProcessArgs& args, int chann
 
 	//Display - update when a button is clicked or during a clock step
 	if(shouldRefreshDisplay || wasButtonPressedThisSample){
-		updateDisplay(channels);
+		updateDisplay();
 	}
 
 	//Audition
-	for (int c = 0; c < channels; c++) {
-		if(inputs[GATE_INPUT].getVoltage(c) > 0.f){
-			outputs[GATE_OUTPUT].setVoltage(inputs[GATE_INPUT].getVoltage(c),c);
-			outputs[VOCT_OUTPUT].setVoltage(inputs[VOCT_INPUT].getVoltage(c),c);
-			outputs[VELOCITY_OUTPUT].setVoltage(inputs[VELOCITY_INPUT].getVoltage(c),c);
-		}
+	if(inputs[GATE_INPUT].getVoltage() > 0.f){
+		outputs[GATE_OUTPUT].setVoltage(inputs[GATE_INPUT].getVoltage());
+		outputs[VOCT_OUTPUT].setVoltage(inputs[VOCT_INPUT].getVoltage());
+		outputs[VELOCITY_OUTPUT].setVoltage(inputs[VELOCITY_INPUT].getVoltage());
 	}
 }
 
-void SixtyFourGatePitchSeqKnobs::copyNotes(int channels, bool cut) {
-	for (int c = 0; c < channels; c++) {
-		for(int i = 0; i < 64; i++){
-			if(editModeSelectedGates[i]){
-				gateCopy[c] = gatePCV[sequencePage][c][i] > 0.1f;
-				voctCopy[c] = voctPCV[sequencePage][c][i];
-				velocityCopy[c] = velocityPCV[sequencePage][c][i];
-				hasRecordedDataCopy[c] = hasRecordedDataPCV[sequencePage][c][i] > 0.1f;
-				dataOneCopy[c] = dataOnePCV[sequencePage][c][i];
-				dataTwoCopy[c] = dataTwoPCV[sequencePage][c][i];
-				selectionCopy[c] = true;
-				//todo multi select, require first selected index, paste transforms and loops at max step count
-			}
+void SixtyFourGatePitchSeqKnobs::copyNotes(bool cut) {
+	for(int i = 0; i < 64; i++){
+		if(editModeSelectedGates[i]){
+			gateCopy = gatePCV[sequencePage][i] > 0.1f;
+			voctCopy = voctPCV[sequencePage][i];
+			velocityCopy = velocityPCV[sequencePage][i];
+			hasRecordedDataCopy = hasRecordedDataPCV[sequencePage][i] > 0.1f;
+			dataOneCopy = dataOnePCV[sequencePage][i];
+			dataTwoCopy = dataTwoPCV[sequencePage][i];
+			selectionCopy = true;
+			//todo multi select, require first selected index, paste transforms and loops at max step count
 		}
 	}
 	for (int i = 0; i < 64; i++) {
 		if(cut){
 			if(editModeSelectedGates[i]){
-				clearNoteParams(i, 16);
+				clearNoteParams(i);
 			}
 		}
 		editModeSelectedGates[i] = false;
@@ -676,21 +741,19 @@ void SixtyFourGatePitchSeqKnobs::copyNotes(int channels, bool cut) {
 	shouldRefreshDisplay = true;
 }
 
-void SixtyFourGatePitchSeqKnobs::cutNotes(int channels) {
-	copyNotes(channels, true);
+void SixtyFourGatePitchSeqKnobs::cutNotes() {
+	copyNotes(true);
 }
 
-void SixtyFourGatePitchSeqKnobs::pasteNotes(int channels) {
-	for (int c = 0; c < channels; c++) {
-		for(int i = 0; i < 64; i++){
-			if(editModeSelectedGates[i]){
-				gatePCV[sequencePage][c][i] = gateCopy[c] ? 10.f : 0.f;
-				voctPCV[sequencePage][c][i] = voctCopy[c];
-				velocityPCV[sequencePage][c][i] = velocityCopy[c];
-				hasRecordedDataPCV[sequencePage][c][i] = hasRecordedDataCopy[c] ? 10.f : 0.f;
-				dataOnePCV[sequencePage][c][i] = dataOneCopy[c];
-				dataTwoPCV[sequencePage][c][i] = dataTwoCopy[c];
-			}
+void SixtyFourGatePitchSeqKnobs::pasteNotes() {
+	for(int i = 0; i < 64; i++){
+		if(editModeSelectedGates[i]){
+			gatePCV[sequencePage][i] = gateCopy ? 10.f : 0.f;
+			voctPCV[sequencePage][i] = voctCopy;
+			velocityPCV[sequencePage][i] = velocityCopy;
+			hasRecordedDataPCV[sequencePage][i] = hasRecordedDataCopy ? 10.f : 0.f;
+			dataOnePCV[sequencePage][i] = dataOneCopy;
+			dataTwoPCV[sequencePage][i] = dataTwoCopy;
 		}
 	}
 	for (int i = 0; i < 64; i++) {
@@ -698,6 +761,7 @@ void SixtyFourGatePitchSeqKnobs::pasteNotes(int channels) {
 	}
 	syncKnobs();
 	shouldRefreshDisplay = true;
+	invalidateStepRolls();
 }
 
 void SixtyFourGatePitchSeqKnobs::setModeBrightnesses() {
@@ -707,138 +771,77 @@ void SixtyFourGatePitchSeqKnobs::setModeBrightnesses() {
 	lights[GATE_MODE_LIGHT].setBrightness(gateModeSelected);
 }
 
-void SixtyFourGatePitchSeqKnobs::clearNoteParams(int i, int channels) {
-	for (int c = 0; c < channels; c++){
-		gatePCV[sequencePage][c][i] = 0.f;
-		velocityPCV[sequencePage][c][i] = 0.f;
-		voctPCV[sequencePage][c][i] = 0.f;
-		hasRecordedDataPCV[sequencePage][c][i] = 0.f;
-		dataOnePCV[sequencePage][c][i] = 0.f;
-		dataTwoPCV[sequencePage][c][i] = 0.f;
-	}
+void SixtyFourGatePitchSeqKnobs::clearNoteParams(int i) {
+	gatePCV[sequencePage][i] = 0.f;
+	velocityPCV[sequencePage][i] = 0.f;
+	voctPCV[sequencePage][i] = 0.f;
+	hasRecordedDataPCV[sequencePage][i] = 0.f;
+	dataOnePCV[sequencePage][i] = 0.f;
+	dataTwoPCV[sequencePage][i] = 0.f;
 }
 
-void SixtyFourGatePitchSeqKnobs::updateDisplay(int channels){
+void SixtyFourGatePitchSeqKnobs::updateDisplay(){
 	float red = 0;
 	float green = 0;
 	float blue = 0;
-	float prevMinVoct = minVoct;
-	float prevMaxVoct = maxVoct;
-	minVoct = 10.f;
-	maxVoct = -10.f;
-	float prevMinVel = minVel;
-	float prevMaxVel = maxVel;
-	minVel = 10.f;
-	maxVel = -10.f;
-	float prevMinDataOne = minDataOne;
-	float prevMaxDataOne = maxDataOne;
-	minDataOne = 10.f;
-	maxDataOne = -10.f;
-	float prevMinDataTwo = minDataTwo;
-	float prevMaxDataTwo = maxDataTwo;
-	minDataTwo = 10.f;
-	maxDataTwo = -10.f;
 
 	const int displayMode = getDataSource();
+	// Colours are absolute: the value is mapped straight onto the knob's own range, so
+	// a given value always looks the same no matter what else is on the matrix. The
+	// knob range only scales the colour, it never rescales the knob position.
+	const float rangeLo = knobRangeMin();
+	const float rangeSpan = 10.f - rangeLo;
 
 	for (int i = 0; i < 64; i++) {
-		//min max
-		float voct = 0.f;
-		float vel = 0.f;
-		float gateVal = -10.f;
-		float dataOne = 0.f;
-		float dataTwo = 0.f;
-		float voctSum = 0.f;
-		float velSum = 0.f;
-		float dataOneSum = 0.f;
-		float dataTwoSum = 0.f;
-		int writtenChannelCount = 0;
-		for (int c = 0; c < channels; c++) {
-			if(gatePCV[sequencePage][c][i] > 0.1f){
-				voctSum = voctSum + voctPCV[sequencePage][c][i];
-				velSum = velSum + velocityPCV[sequencePage][c][i];
-				dataOneSum = dataOneSum + dataOnePCV[sequencePage][c][i];
-				dataTwoSum = dataTwoSum + dataTwoPCV[sequencePage][c][i];
-				gateVal = 10.f;
-				writtenChannelCount++;
-			}
-		}
-		// Guard the divide, a step without a gate has nothing to average
-		if (writtenChannelCount > 0) {
-			voct = (voctSum / writtenChannelCount);
-			vel = (velSum / writtenChannelCount);
-			dataOne = (dataOneSum / writtenChannelCount);
-			dataTwo = (dataTwoSum / writtenChannelCount);
-		}
-
-		bool written = false;
-		for (int c = 0; c < channels; c++) {
-			if (hasRecordedDataPCV[sequencePage][c][i] > 0.1f){
-				written = true;
-			}
-		}
-		//write min maxes
-		if(written && i < (stepCountInt)){
-			minVoct = voct < minVoct ? voct : minVoct;
-			maxVoct = voct > maxVoct ? voct : maxVoct;
-			minVel = vel < minVel ? vel : minVel;
-			maxVel = vel > maxVel ? vel : maxVel;
-			minDataOne = dataOne < minDataOne ? dataOne : minDataOne;
-			maxDataOne = dataOne > maxDataOne ? dataOne : maxDataOne;
-			minDataTwo = dataTwo < minDataTwo ? dataTwo : minDataTwo;
-			maxDataTwo = dataTwo > maxDataTwo ? dataTwo : maxDataTwo;
-		}
+		const float gateVal = gatePCV[sequencePage][i] > 0.1f ? 10.f : -10.f;
+		const bool written = hasRecordedDataPCV[sequencePage][i] > 0.1f;
+		// The same value the knob is showing, so the colour and the pointer always agree
+		const float value = *stepValuePtr(i);
+		// Where it sits on the knob's own range, 0 at the bottom and 1 at the top
+		const float t = math::clamp((value - rangeLo) / rangeSpan, 0.f, 1.f);
 		//Display Mode Brightness
 		if(i <= (stepCountInt - 1)) {
 			switch(displayMode){
-				//[1] - Gate display
+				//[1] - Probability display, blue brightness is the chance of firing
 				case 1:
-					blue = written ? 1.f : 0.f;
-					//if iterating through the current step, divide the gate value by 10 (1.f fully lit) else divide by 12 = .83f (83% brightness)
-					if (!written) {
-						blue = gateVal / (i == currentStep ? 10.f : 12.f);
-					}
+					blue = t;
 					break;
 
-				//[2] - Voct display
+				//[2] - Voct display, red at the bottom of the range to green at the top
 				case 2:
-					//normalize colors unless min and max are the same, then it should just be green :3
-					red = (prevMaxVoct == prevMinVoct) ? 0.f : 1 - ((voct - prevMinVoct) / (prevMaxVoct - prevMinVoct));
-					green = (prevMaxVoct == prevMinVoct) ? 1.f : (voct - prevMinVoct) / (prevMaxVoct - prevMinVoct);
+					red = 1.f - t;
+					green = t;
 					//blue should be blank unless no voct then we do dull blue (10%) to show that theres still a gate there
 					if (!written) {
 						blue = gateVal / 100.f;
 					}
 					break;
 
-				//[3] - Velocity display
+				//[3] - Velocity display, dim red to bright red
 				case 3:
-					//normalize velocity unless min and max are the same, then it should just be bright green :3
-					red = (prevMaxVel == prevMinVel) ? 1.f : ((vel - prevMinVel) / (prevMaxVel - prevMinVel));
-					//minimum 0.5 on vel
-					red = red < .05f ? .05f : red;
+					red = t < .05f ? .05f : t;
 					if (!written) {
 						blue = gateVal / 100.f;
 					}
 					break;
 
-				//[4] - Data one display
+				//[4] - Data one display, cyan
 				case 4:
-					green = (prevMaxDataOne == prevMinDataOne) ? 1.f : ((dataOne - prevMinDataOne) / (prevMaxDataOne - prevMinDataOne));
+					green = t;
 					if (written) {
-						blue = green;
+						blue = t;
 					} else {
 						green = 0.f;
 						blue = gateVal / 100.f;
 					}
 					break;
 
-				//[5] - Data two display
+				//[5] - Data two display, magenta
 				case 5:
 				default:
-					red = (prevMaxDataTwo == prevMinDataTwo) ? 1.f : ((dataTwo - prevMinDataTwo) / (prevMaxDataTwo - prevMinDataTwo));
+					red = t;
 					if (written) {
-						blue = red;
+						blue = t;
 					} else {
 						red = 0.f;
 						blue = gateVal / 100.f;
@@ -877,8 +880,9 @@ void SixtyFourGatePitchSeqKnobs::updateDisplay(int channels){
 			buttonShade[i] = SHADE_BUTTON_OUT_OF_RANGE;
 		}
 
-		//Active step - a bright ring around the knob that is playing
-		lights[PLAYHEAD_LIGHTS + i].setBrightness(i == currentStep ? 1.f : 0.f);
+		// Active step - green glow behind the button, and only while the step actually
+		// fired, so a step that lost its probability roll stays dark
+		lights[PLAYHEAD_LIGHTS + i].setBrightness(i == currentStep && currentStepFired ? 1.f : 0.f);
 	}
 	//reset vars so we dont iterate every sample
 	wasButtonPressedThisSample = false;
@@ -888,61 +892,51 @@ void SixtyFourGatePitchSeqKnobs::updateDisplay(int channels){
 json_t* SixtyFourGatePitchSeqKnobs::dataToJson() {
 	// PCV Dimensions
     const int pD = 10;
-    const int cD = 16;
     const int vD = 64;
 
 	json_t* rootJ = json_object(); // Create a JSON object
 
-	json_t* gate3d = json_array();
-	json_t* voct3d = json_array();
-	json_t* rec3d = json_array();
-	json_t* vel3d = json_array();
-	json_t* dataOne3d = json_array();
-	json_t* dataTwo3d = json_array();
+	// One voice, so the shape is page then step
+	json_t* gateArr = json_array();
+	json_t* voctArr = json_array();
+	json_t* recArr = json_array();
+	json_t* velArr = json_array();
+	json_t* dataOneArr = json_array();
+	json_t* dataTwoArr = json_array();
+	json_t* probArr = json_array();
 	for (int p = 0; p < pD; p++) {
-		json_t* gate2d = json_array();
-		json_t* voct2d = json_array();
-		json_t* rec2d = json_array();
-		json_t* vel2d = json_array();
-		json_t* dataOne2d = json_array();
-		json_t* dataTwo2d = json_array();
+		json_t* gatePage = json_array();
+		json_t* voctPage = json_array();
+		json_t* recPage = json_array();
+		json_t* velPage = json_array();
+		json_t* dataOnePage = json_array();
+		json_t* dataTwoPage = json_array();
+		json_t* probPage = json_array();
 
-		for (int c = 0; c < cD; c++) {
-			json_t* gate1d = json_array();
-			json_t* voct1d = json_array();
-			json_t* rec1d = json_array();
-			json_t* vel1d = json_array();
-			json_t* dataOne1d = json_array();
-			json_t* dataTwo1d = json_array();
-
-			for (int v = 0; v < vD; v++) {
-				json_array_append_new(gate1d, json_real(gatePCV[p][c][v]));
-				json_array_append_new(voct1d, json_real(voctPCV[p][c][v]));
-				json_array_append_new(rec1d, json_real(hasRecordedDataPCV[p][c][v]));
-				json_array_append_new(vel1d, json_real(velocityPCV[p][c][v]));
-				json_array_append_new(dataOne1d, json_real(dataOnePCV[p][c][v]));
-				json_array_append_new(dataTwo1d, json_real(dataTwoPCV[p][c][v]));
-			}
-			json_array_append_new(gate2d, gate1d);
-			json_array_append_new(voct2d, voct1d);
-			json_array_append_new(rec2d, rec1d);
-			json_array_append_new(vel2d, vel1d);
-			json_array_append_new(dataOne2d, dataOne1d);
-			json_array_append_new(dataTwo2d, dataTwo1d);
+		for (int v = 0; v < vD; v++) {
+			json_array_append_new(gatePage, json_real(gatePCV[p][v]));
+			json_array_append_new(voctPage, json_real(voctPCV[p][v]));
+			json_array_append_new(recPage, json_real(hasRecordedDataPCV[p][v]));
+			json_array_append_new(velPage, json_real(velocityPCV[p][v]));
+			json_array_append_new(dataOnePage, json_real(dataOnePCV[p][v]));
+			json_array_append_new(dataTwoPage, json_real(dataTwoPCV[p][v]));
+			json_array_append_new(probPage, json_real(probabilityPCV[p][v]));
 		}
-		json_array_append_new(gate3d, gate2d);
-		json_array_append_new(voct3d, voct2d);
-		json_array_append_new(rec3d, rec2d);
-		json_array_append_new(vel3d, vel2d);
-		json_array_append_new(dataOne3d, dataOne2d);
-		json_array_append_new(dataTwo3d, dataTwo2d);
+		json_array_append_new(gateArr, gatePage);
+		json_array_append_new(voctArr, voctPage);
+		json_array_append_new(recArr, recPage);
+		json_array_append_new(velArr, velPage);
+		json_array_append_new(dataOneArr, dataOnePage);
+		json_array_append_new(dataTwoArr, dataTwoPage);
+		json_array_append_new(probArr, probPage);
 	}
-	json_object_set_new(rootJ, "gatePCV", gate3d);
-	json_object_set_new(rootJ, "voctPCV", voct3d);
-	json_object_set_new(rootJ, "hasRecordedDataPCV", rec3d);
-	json_object_set_new(rootJ, "velocityPCV", vel3d);
-	json_object_set_new(rootJ, "dataOnePCV", dataOne3d);
-	json_object_set_new(rootJ, "dataTwoPCV", dataTwo3d);
+	json_object_set_new(rootJ, "gatePCV", gateArr);
+	json_object_set_new(rootJ, "voctPCV", voctArr);
+	json_object_set_new(rootJ, "hasRecordedDataPCV", recArr);
+	json_object_set_new(rootJ, "velocityPCV", velArr);
+	json_object_set_new(rootJ, "dataOnePCV", dataOneArr);
+	json_object_set_new(rootJ, "dataTwoPCV", dataTwoArr);
+	json_object_set_new(rootJ, "probabilityPCV", probArr);
 
 	return rootJ;
 }
@@ -950,73 +944,64 @@ json_t* SixtyFourGatePitchSeqKnobs::dataToJson() {
 void SixtyFourGatePitchSeqKnobs::dataFromJson(json_t* rootJ) {
 	// PCV Dimensions
     const int pD = 10;
-    const int cD = 16;
     const int vD = 64;
 
-	json_t* gate3D = json_object_get(rootJ, "gatePCV");
-	json_t* voct3D = json_object_get(rootJ, "voctPCV");
-	json_t* rec3D = json_object_get(rootJ, "hasRecordedDataPCV");
-	json_t* vel3D = json_object_get(rootJ, "velocityPCV");
-	json_t* dataOne3D = json_object_get(rootJ, "dataOnePCV");
-	json_t* dataTwo3D = json_object_get(rootJ, "dataTwoPCV");
-    if (gate3D && json_is_array(gate3D) &&
-		voct3D && json_is_array(voct3D) &&
-		rec3D && json_is_array(rec3D) &&
-		vel3D && json_is_array(vel3D) &&
-		dataOne3D && json_is_array(dataOne3D) &&
-		dataTwo3D && json_is_array(dataTwo3D)) {
+	json_t* gateArr = json_object_get(rootJ, "gatePCV");
+	json_t* voctArr = json_object_get(rootJ, "voctPCV");
+	json_t* recArr = json_object_get(rootJ, "hasRecordedDataPCV");
+	json_t* velArr = json_object_get(rootJ, "velocityPCV");
+	json_t* dataOneArr = json_object_get(rootJ, "dataOnePCV");
+	json_t* dataTwoArr = json_object_get(rootJ, "dataTwoPCV");
+	// Optional, patches saved before probability existed keep the default of always
+	json_t* probArr = json_object_get(rootJ, "probabilityPCV");
+    if (gateArr && json_is_array(gateArr) &&
+		voctArr && json_is_array(voctArr) &&
+		recArr && json_is_array(recArr) &&
+		velArr && json_is_array(velArr) &&
+		dataOneArr && json_is_array(dataOneArr) &&
+		dataTwoArr && json_is_array(dataTwoArr)) {
         for (int p = 0; p < pD; p++) {
-            json_t* gate2D = json_array_get(gate3D, p);
-			json_t* voct2D = json_array_get(voct3D, p);
-			json_t* rec2D = json_array_get(rec3D, p);
-			json_t* vel2D = json_array_get(vel3D, p);
-			json_t* dataOne2D = json_array_get(dataOne3D, p);
-			json_t* dataTwo2D = json_array_get(dataTwo3D, p);
-            if (gate2D && json_is_array(gate2D) &&
-				voct2D && json_is_array(voct2D) &&
-				rec2D && json_is_array(rec2D) &&
-				vel2D && json_is_array(vel2D) &&
-				dataOne2D && json_is_array(dataOne2D) &&
-				dataTwo2D && json_is_array(dataTwo2D)) {
-                for (int c = 0; c < cD; c++) {
-                    json_t* gate1D = json_array_get(gate2D, c);
-					json_t* voct1D = json_array_get(voct2D, c);
-					json_t* rec1D = json_array_get(rec2D, c);
-					json_t* vel1D = json_array_get(vel2D, c);
-					json_t* dataOne1D = json_array_get(dataOne2D, c);
-					json_t* dataTwo1D = json_array_get(dataTwo2D, c);
-                    if (gate1D && json_is_array(gate1D) &&
-						voct1D && json_is_array(voct1D) &&
-						rec1D && json_is_array(rec1D) &&
-						vel1D && json_is_array(vel1D) &&
-						dataOne1D && json_is_array(dataOne1D) &&
-						dataTwo1D && json_is_array(dataTwo1D)) {
-                        for (int v = 0; v < vD; v++) {
-                            json_t* gateValue = json_array_get(gate1D, v);
-                            if (gateValue && json_is_real(gateValue)) {
-                                gatePCV[p][c][v] = json_real_value(gateValue);
-                            }
-							json_t* voctValue = json_array_get(voct1D, v);
-                            if (voctValue && json_is_real(voctValue)) {
-                                voctPCV[p][c][v] = json_real_value(voctValue);
-                            }
-							json_t* recValue = json_array_get(rec1D, v);
-                            if (recValue && json_is_real(recValue)) {
-                                hasRecordedDataPCV[p][c][v] = json_real_value(recValue);
-                            }
-							json_t* velValue = json_array_get(vel1D, v);
-                            if (velValue && json_is_real(velValue)) {
-                                velocityPCV[p][c][v] = json_real_value(velValue);
-                            }
-							json_t* dataOneValue = json_array_get(dataOne1D, v);
-                            if (dataOneValue && json_is_real(dataOneValue)) {
-                                dataOnePCV[p][c][v] = json_real_value(dataOneValue);
-                            }
-							json_t* dataTwoValue = json_array_get(dataTwo1D, v);
-                            if (dataTwoValue && json_is_real(dataTwoValue)) {
-                                dataTwoPCV[p][c][v] = json_real_value(dataTwoValue);
-                            }
-                        }
+            json_t* gatePage = json_array_get(gateArr, p);
+			json_t* voctPage = json_array_get(voctArr, p);
+			json_t* recPage = json_array_get(recArr, p);
+			json_t* velPage = json_array_get(velArr, p);
+			json_t* dataOnePage = json_array_get(dataOneArr, p);
+			json_t* dataTwoPage = json_array_get(dataTwoArr, p);
+			json_t* probPage = probArr ? json_array_get(probArr, p) : NULL;
+            if (gatePage && json_is_array(gatePage) &&
+				voctPage && json_is_array(voctPage) &&
+				recPage && json_is_array(recPage) &&
+				velPage && json_is_array(velPage) &&
+				dataOnePage && json_is_array(dataOnePage) &&
+				dataTwoPage && json_is_array(dataTwoPage)) {
+                for (int v = 0; v < vD; v++) {
+                    json_t* gateValue = json_array_get(gatePage, v);
+                    if (gateValue && json_is_real(gateValue)) {
+                        gatePCV[p][v] = json_real_value(gateValue);
+                    }
+					json_t* voctValue = json_array_get(voctPage, v);
+                    if (voctValue && json_is_real(voctValue)) {
+                        voctPCV[p][v] = json_real_value(voctValue);
+                    }
+					json_t* recValue = json_array_get(recPage, v);
+                    if (recValue && json_is_real(recValue)) {
+                        hasRecordedDataPCV[p][v] = json_real_value(recValue);
+                    }
+					json_t* velValue = json_array_get(velPage, v);
+                    if (velValue && json_is_real(velValue)) {
+                        velocityPCV[p][v] = json_real_value(velValue);
+                    }
+					json_t* dataOneValue = json_array_get(dataOnePage, v);
+                    if (dataOneValue && json_is_real(dataOneValue)) {
+                        dataOnePCV[p][v] = json_real_value(dataOneValue);
+                    }
+					json_t* dataTwoValue = json_array_get(dataTwoPage, v);
+                    if (dataTwoValue && json_is_real(dataTwoValue)) {
+                        dataTwoPCV[p][v] = json_real_value(dataTwoValue);
+                    }
+					json_t* probValue = probPage ? json_array_get(probPage, v) : NULL;
+                    if (probValue && json_is_real(probValue)) {
+                        probabilityPCV[p][v] = json_real_value(probValue);
                     }
                 }
             }
@@ -1025,44 +1010,45 @@ void SixtyFourGatePitchSeqKnobs::dataFromJson(json_t* rootJ) {
 	// The knobs mirror the stored values, so pull them back in
 	syncKnobs();
 	shouldRefreshDisplay = true;
+	invalidateStepRolls();
 }
 
 void SixtyFourGatePitchSeqKnobs::onRandomize(const RandomizeEvent& e){
 	Module::onRandomize(e);
+	Module::onRandomize(e);
 	const int pD = 10;
-    const int cD = 16;
     const int vD = 64;
 	for (int p = 0; p < pD; p++) {
-        for (int c = 0; c < cD; c++) {
-            for (int v = 0; v < vD; v++) {
-				hasRecordedDataPCV[p][c][v] = 10.f;
-				gatePCV[p][c][v] = 10.f;
-                voctPCV[p][c][v] = (10.f * random::uniform()) - 5.f;
-				velocityPCV[p][c][v] = 10.f * random::uniform();
-				dataOnePCV[p][c][v] = (10.f * random::uniform()) - 5.f;
-				dataTwoPCV[p][c][v] = (10.f * random::uniform()) - 5.f;
-			}
+        for (int v = 0; v < vD; v++) {
+				hasRecordedDataPCV[p][v] = 10.f;
+				gatePCV[p][v] = 10.f;
+                voctPCV[p][v] = (10.f * random::uniform()) - 5.f;
+				velocityPCV[p][v] = 10.f * random::uniform();
+				dataOnePCV[p][v] = (10.f * random::uniform()) - 5.f;
+				dataTwoPCV[p][v] = (10.f * random::uniform()) - 5.f;
+				probabilityPCV[p][v] = 10.f * random::uniform();
 		}
 	}
 	syncKnobs();
 	shouldRefreshDisplay = true;
+	invalidateStepRolls();
 }
 
 void SixtyFourGatePitchSeqKnobs::onReset(const ResetEvent& e){
 	Module::onReset(e);
+	Module::onReset(e);
 	const int pD = 10;
-    const int cD = 16;
     const int vD = 64;
 	for (int p = 0; p < pD; p++) {
-        for (int c = 0; c < cD; c++) {
-            for (int v = 0; v < vD; v++) {
-				hasRecordedDataPCV[p][c][v] = 0.0f;
-				gatePCV[p][c][v] = 0.0f;
-                voctPCV[p][c][v] = 0.0f;
-				velocityPCV[p][c][v] = 0.0f;
-				dataOnePCV[p][c][v] = 0.0f;
-				dataTwoPCV[p][c][v] = 0.0f;
-			}
+        for (int v = 0; v < vD; v++) {
+				voctPCV[p][v] = 0.0f;
+				velocityPCV[p][v] = 0.0f;
+				dataOnePCV[p][v] = 0.0f;
+				dataTwoPCV[p][v] = 0.0f;
+				// Every step starts enabled, with a note slot ready and a chance of firing
+				probabilityPCV[p][v] = 10.0f;
+				gatePCV[p][v] = 10.0f;
+				hasRecordedDataPCV[p][v] = 10.0f;
 		}
 	}
 	for (int i = 0; i < 64; i++) {
@@ -1070,6 +1056,7 @@ void SixtyFourGatePitchSeqKnobs::onReset(const ResetEvent& e){
 	}
 	syncKnobs();
 	shouldRefreshDisplay = true;
+	invalidateStepRolls();
 }
 
 
