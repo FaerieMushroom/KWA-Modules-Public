@@ -141,6 +141,8 @@ void SixtyFourGatePitchSeq::process(const ProcessArgs& args) {
 		const int playheadModeInt = std::floor(expanderSignalPlayhead);
 		if (playheadModeInt == 1) { // Descend
 			currentStep = stepCountInt - 1;
+		} else if (playheadModeInt == 5) { // Vertical Descend starts at the bottom of the last column
+			currentStep = verticalStepAt(0, playheadModeInt, std::max(1, std::min(stepCountInt, 64)));
 		} else {
 			currentStep = 0;
 		}
@@ -289,6 +291,35 @@ void SixtyFourGatePitchSeq::process(const ProcessArgs& args) {
 					}
 					break;
 				}
+				case 4:
+				case 5: {
+					// Vertical modes walk a column instead of a row. Only the steps the Steps
+					// knob has switched on are ever visited, so this reorders the active range
+					// rather than reaching outside it.
+					if (currentStep < 64) {
+						const int range = std::max(1, std::min(stepCountInt, 64));
+						if (expanderSignalOneShot > 0.f) {
+							currentStep = 64; // Stop
+						} else {
+							// Which slot of the order the playhead sits in, -1 when it is not
+							// in the order at all, which is what lowering the Steps knob under
+							// the playhead leaves behind
+							int p = -1;
+							for (int i = 0; i < range; i++) {
+								if (verticalStepAt(i, playheadModeInt, range) == currentStep) {
+									p = i;
+									break;
+								}
+							}
+							const bool wrapped = p == range - 1;
+							p = (p + 1 + range) % range;
+							currentStep = verticalStepAt(p, playheadModeInt, range);
+							if (wrapped)
+								eocOutputPulse.trigger(1e-3f);
+						}
+					}
+					break;
+				}
 			}
 				//Pulse outputs if gate
 				if (currentStep < 64) {
@@ -368,6 +399,11 @@ void SixtyFourGatePitchSeq::process(const ProcessArgs& args) {
 				case 3:
 					// Random has no predictable next step, so the gate writes onto the step
 					// that is playing rather than ahead of it
+					currentWorkingStep = currentStep;
+					break;
+				case 4:
+				case 5:
+					// Same for the vertical modes, a column walk has no known successor
 					currentWorkingStep = currentStep;
 					break;
 			}

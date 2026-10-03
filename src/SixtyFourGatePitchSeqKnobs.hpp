@@ -176,6 +176,17 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 
 	void pullKnobs();
 
+	/** The 64 step values a display source addresses on the current page, or NULL for an
+	unknown source. Sources match getDataSource(): 1 probability, 2 V/Oct, 3 velocity, 4 and 5
+	the data buses. The arrays are contiguous, so one pointer covers the whole page. */
+	float* stepDataPtr(int source);
+
+	/** Randomises one source across every step of the current page. */
+	void randomizeStepData(int source);
+
+	/** Resets one source across every step of the current page. */
+	void initializeStepData(int source);
+
 	json_t* dataToJson() override;
 
 	void dataFromJson(json_t* rootJ) override;

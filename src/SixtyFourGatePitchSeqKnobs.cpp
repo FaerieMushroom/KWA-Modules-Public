@@ -71,8 +71,13 @@ SixtyFourGatePitchSeqKnobs::SixtyFourGatePitchSeqKnobs() {
 	//knobs
 	configSwitch(DISPLAY_MODE_PARAM, 1.f, 5.f, 2.f, "Display Mode", {"Probability", "V/Oct", "Velocity", "Data 1", "Data 2"});
 	getParamQuantity(DISPLAY_MODE_PARAM)->snapEnabled = true;
+	// Display Mode and Steps decide what the knobs address and how much of the sequence is in
+	// range. They are view settings rather than sequence content, so randomize leaves them
+	// where the patch had them.
+	getParamQuantity(DISPLAY_MODE_PARAM)->randomizeEnabled = false;
 	configParam(STEP_COUNT_PARAM, 1.f, 64.f, 8.f, "Steps");
 	getParamQuantity(STEP_COUNT_PARAM)->snapEnabled = true;
+	getParamQuantity(STEP_COUNT_PARAM)->randomizeEnabled = false;
 	//Right click the module to switch the step knobs between bipolar and unipolar
 	configSwitch(KNOB_RANGE_PARAM, 0.f, 1.f, 0.f, "Knob Range", {"-10 to 10", "0 to 10"});
 	getParamQuantity(KNOB_RANGE_PARAM)->randomizeEnabled = false;
@@ -198,6 +203,58 @@ void SixtyFourGatePitchSeqKnobs::pullKnobs() {
 	}
 }
 
+// Probability and velocity are unipolar, pitch and the data buses are bipolar, which is how
+// the step knobs are ranged for those sources
+static void stepDataRange(int source, float& lo, float& hi) {
+	if (source == 1 || source == 3) {
+		lo = 0.f;
+		hi = 10.f;
+	}
+	else {
+		lo = -5.f;
+		hi = 5.f;
+	}
+}
+
+float* SixtyFourGatePitchSeqKnobs::stepDataPtr(int source) {
+	switch (source) {
+		case 1: return &probabilityPCV[sequencePage][0];
+		case 2: return &voctPCV[sequencePage][0];
+		case 3: return &velocityPCV[sequencePage][0];
+		case 4: return &dataOnePCV[sequencePage][0];
+		case 5: return &dataTwoPCV[sequencePage][0];
+	}
+	return NULL;
+}
+
+void SixtyFourGatePitchSeqKnobs::randomizeStepData(int source) {
+	float* data = stepDataPtr(source);
+	if (!data)
+		return;
+	float lo = 0.f;
+	float hi = 0.f;
+	stepDataRange(source, lo, hi);
+	for (int i = 0; i < 64; i++)
+		data[i] = lo + (hi - lo) * random::uniform();
+	invalidateStepRolls();
+	syncKnobs();
+	shouldRefreshDisplay = true;
+}
+
+void SixtyFourGatePitchSeqKnobs::initializeStepData(int source) {
+	float* data = stepDataPtr(source);
+	if (!data)
+		return;
+	// Probabilities back to always firing, every other source to zero, which is the state a
+	// fresh module starts in
+	const float value = source == 1 ? 10.f : 0.f;
+	for (int i = 0; i < 64; i++)
+		data[i] = value;
+	invalidateStepRolls();
+	syncKnobs();
+	shouldRefreshDisplay = true;
+}
+
 void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 	// Mono by design. A knob sequencer steps as one voice, so polyphony would only carry
 	// sixteen copies of data nothing reads. Gate channels past the first are ignored.
@@ -305,6 +362,8 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		const int playheadModeInt = std::floor(expanderSignalPlayhead);
 		if (playheadModeInt == 1) { // Descend
 			currentStep = stepCountInt - 1;
+		} else if (playheadModeInt == 5) { // Vertical Descend starts at the bottom of the last column
+			currentStep = verticalStepAt(0, playheadModeInt, std::max(1, std::min(stepCountInt, 64)));
 		} else {
 			currentStep = 0;
 		}
@@ -453,6 +512,35 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 					}
 					break;
 				}
+				case 4:
+				case 5: {
+					// Vertical modes walk a column instead of a row. Only the steps the Steps
+					// knob has switched on are ever visited, so this reorders the active range
+					// rather than reaching outside it.
+					if (currentStep < 64) {
+						const int range = std::max(1, std::min(stepCountInt, 64));
+						if (expanderSignalOneShot > 0.f) {
+							currentStep = 64; // Stop
+						} else {
+							// Which slot of the order the playhead sits in, -1 when it is not
+							// in the order at all, which is what lowering the Steps knob under
+							// the playhead leaves behind
+							int p = -1;
+							for (int i = 0; i < range; i++) {
+								if (verticalStepAt(i, playheadModeInt, range) == currentStep) {
+									p = i;
+									break;
+								}
+							}
+							const bool wrapped = p == range - 1;
+							p = (p + 1 + range) % range;
+							currentStep = verticalStepAt(p, playheadModeInt, range);
+							if (wrapped)
+								eocOutputPulse.trigger(1e-3f);
+						}
+					}
+					break;
+				}
 			}
 				//Pulse outputs if gate
 				currentStepFired = true;
@@ -533,6 +621,11 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 				case 3:
 					// Random has no predictable next step, so the gate writes onto the step
 					// that is playing rather than ahead of it
+					currentWorkingStep = currentStep;
+					break;
+				case 4:
+				case 5:
+					// Same for the vertical modes, a column walk has no known successor
 					currentWorkingStep = currentStep;
 					break;
 			}
@@ -1039,7 +1132,6 @@ void SixtyFourGatePitchSeqKnobs::dataFromJson(json_t* rootJ) {
 
 void SixtyFourGatePitchSeqKnobs::onRandomize(const RandomizeEvent& e){
 	Module::onRandomize(e);
-	Module::onRandomize(e);
 	const int pD = 10;
     const int vD = 64;
 	for (int p = 0; p < pD; p++) {
@@ -1316,6 +1408,22 @@ void SixtyFourGatePitchSeqKnobsWidget::appendContextMenu(ui::Menu* menu) {
 		[=]() { return module->params[SixtyFourGatePitchSeqKnobs::KNOB_RANGE_PARAM].getValue() > 0.5f ? 1 : 0; },
 		[=](size_t index) { module->params[SixtyFourGatePitchSeqKnobs::KNOB_RANGE_PARAM].setValue(index == 1 ? 1.f : 0.f); }
 	));
+
+	// One entry per source, in the same order as the Display knob. Each acts on every step of
+	// the current page, so raising the Steps knob afterwards reveals content that is already there.
+	static const char* sourceNames[5] = {"Probabilities", "Pitch", "Velocity", "Data 1", "Data 2"};
+	menu->addChild(createSubmenuItem("Randomize Steps", "",
+		[=](ui::Menu* sub) {
+			for (int s = 1; s <= 5; s++)
+				sub->addChild(createMenuItem(sourceNames[s - 1], "",
+					[=]() { module->randomizeStepData(s); }));
+		}));
+	menu->addChild(createSubmenuItem("Initialize Steps", "",
+		[=](ui::Menu* sub) {
+			for (int s = 1; s <= 5; s++)
+				sub->addChild(createMenuItem(sourceNames[s - 1], "",
+					[=]() { module->initializeStepData(s); }));
+		}));
 }
 
 
