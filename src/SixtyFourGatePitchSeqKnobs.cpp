@@ -914,7 +914,9 @@ void SixtyFourGatePitchSeqKnobs::updateDisplay(){
 
 	// Normalized colours stretch the scale across the steps that are actually in play, so the
 	// lowest of them lands on the bottom of the colour ramp and the highest on the top.
-	const bool normalized = params[COLOUR_MODE_PARAM].getValue() < 0.5f;
+	// Probability is exempt: a step's chance of firing means the same thing in every patch, so
+	// there is nothing meaningful to normalize it against.
+	const bool normalized = params[COLOUR_MODE_PARAM].getValue() < 0.5f && displayMode != 1;
 	float normLo = 0.f;
 	float normHi = 0.f;
 	bool normFound = false;
