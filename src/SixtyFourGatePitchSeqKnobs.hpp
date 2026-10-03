@@ -197,6 +197,3 @@ struct SixtyFourGatePitchSeqKnobsWidget : ModuleWidget {
 	SixtyFourGatePitchSeqKnobsWidget(SixtyFourGatePitchSeqKnobs* module);
 	void appendContextMenu(ui::Menu* menu) override;
 };
-
-
-Model* modelSixtyFourGatePitchSeqKnobs = createModel<SixtyFourGatePitchSeqKnobs, SixtyFourGatePitchSeqKnobsWidget>("SixtyFourGatePitchSeqKnobs");

@@ -144,6 +144,3 @@ struct SixtyFourGatePitchSeq : Module {
 struct SixtyFourGatePitchSeqWidget : ModuleWidget {
 	SixtyFourGatePitchSeqWidget(SixtyFourGatePitchSeq* module);
 };
-
-
-Model* modelSixtyFourGatePitchSeq = createModel<SixtyFourGatePitchSeq, SixtyFourGatePitchSeqWidget>("SixtyFourGatePitchSeq");

@@ -1293,3 +1293,6 @@ void SixtyFourGatePitchSeqKnobsWidget::appendContextMenu(ui::Menu* menu) {
 		[=](size_t index) { module->params[SixtyFourGatePitchSeqKnobs::KNOB_RANGE_PARAM].setValue(index == 1 ? 1.f : 0.f); }
 	));
 }
+
+
+Model* modelSixtyFourGatePitchSeqKnobs = createModel<SixtyFourGatePitchSeqKnobs, SixtyFourGatePitchSeqKnobsWidget>("SixtyFourGatePitchSeqKnobs");
