@@ -39,6 +39,9 @@ struct SixtyFourGatePitchSeqExpander : Module {
 	float rightMessages[2][10] = {};
 	float expanderSignalDataOne = 0.f;
 	float expanderSignalDataTwo = 0.f;
+	// Last value mirrored from a CV onto its knob, so we only write on a change
+	float shownPage = 0.f;
+	float shownPlayhead = 0.f;
 
 	SixtyFourGatePitchSeqExpander() {
 		config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
@@ -109,13 +112,37 @@ struct SixtyFourGatePitchSeqExpander : Module {
 			//[2] - Playhead
 			float playheadVal = 0.f;
 			if(inputs[PLAYHEAD_CV_INPUT].isConnected()){
-				playheadVal = inputs[PLAYHEAD_CV_INPUT].getVoltage() / 3.3333;
+				// Full scale is the last mode, so 10 V lands on Vertical Descend. This divides 0 to 10 V
+				// into six equal bands, which is what the old 10/3 divisor did for the original
+				// three modes.
+				playheadVal = inputs[PLAYHEAD_CV_INPUT].getVoltage() * 0.6f;
 				playheadVal = playheadVal < 0.f ? 0.f : playheadVal;
 				playheadVal = playheadVal > 5.f ? 5.f : playheadVal;
 			} else{
 				playheadVal = (params[PLAYHEAD_KNOB_PARAM].getValue() - 1.f);
 			}
 			rightMessage[2] = playheadVal;
+
+			// Mirror each CV onto its knob so they read where the expander is actually set.
+			// A real panel would leave the knob where it was parked, but then there is nothing
+			// on the expander to show what the CV is doing.
+			if (inputs[PAGE_CV_INPUT].isConnected()) {
+				// The sequencer rounds this to a page, so show the page it will land on
+				const float knobValue = std::roundf(pageVal);
+				if (knobValue != shownPage) {
+					shownPage = knobValue;
+					params[PAGE_KNOB_PARAM].setValue(knobValue);
+				}
+			}
+			if (inputs[PLAYHEAD_CV_INPUT].isConnected()) {
+				// The sequencer floors this to a mode, so show the mode it will land on rather
+				// than rounding up a detent the sequencer never enters
+				const float knobValue = std::floor(playheadVal) + 1.f;
+				if (knobValue != shownPlayhead) {
+					shownPlayhead = knobValue;
+					params[PLAYHEAD_KNOB_PARAM].setValue(knobValue);
+				}
+			}
 			//[3] - Data One
 			rightMessage[3] = inputs[DATA_ONE_INPUT].getVoltage();
 			//[4] - Data Two
