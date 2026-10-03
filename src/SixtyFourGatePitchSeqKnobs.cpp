@@ -81,6 +81,9 @@ SixtyFourGatePitchSeqKnobs::SixtyFourGatePitchSeqKnobs() {
 	//Right click the module to switch the step knobs between bipolar and unipolar
 	configSwitch(KNOB_RANGE_PARAM, 0.f, 1.f, 0.f, "Knob Range", {"-10 to 10", "0 to 10"});
 	getParamQuantity(KNOB_RANGE_PARAM)->randomizeEnabled = false;
+	// Normalised by default, like the KWA Pitch 64. Absolute is the alternative.
+	configSwitch(COLOUR_MODE_PARAM, 0.f, 1.f, 0.f, "Colours", {"Normalized", "Absolute"});
+	getParamQuantity(COLOUR_MODE_PARAM)->randomizeEnabled = false;
 
 	//inputs
 	configInput(CLOCK_INPUT, "Clock");
@@ -903,19 +906,51 @@ void SixtyFourGatePitchSeqKnobs::updateDisplay(){
 	float blue = 0;
 
 	const int displayMode = getDataSource();
-	// Colours are absolute: the value is mapped straight onto the knob's own range, so
-	// a given value always looks the same no matter what else is on the matrix. The
-	// knob range only scales the colour, it never rescales the knob position.
+	// The knob's own range. Absolute colours map straight onto it, so a given value always
+	// looks the same no matter what else is on the matrix. The knob range only scales the
+	// colour, it never rescales the knob position.
 	const float rangeLo = knobRangeMin();
 	const float rangeSpan = 10.f - rangeLo;
+
+	// Normalized colours stretch the scale across the steps that are actually in play, so the
+	// lowest of them lands on the bottom of the colour ramp and the highest on the top.
+	const bool normalized = params[COLOUR_MODE_PARAM].getValue() < 0.5f;
+	float normLo = 0.f;
+	float normHi = 0.f;
+	bool normFound = false;
+	if (normalized) {
+		// Only steps that are in range and enabled get a say, so a muted step cannot stretch
+		// the scale and flatten everything else
+		for (int i = 0; i < stepCountInt; i++) {
+			if (gatePCV[sequencePage][i] <= 0.1f)
+				continue;
+			const float v = *stepValuePtr(i);
+			if (!normFound) {
+				normLo = normHi = v;
+				normFound = true;
+			}
+			else {
+				normLo = std::min(normLo, v);
+				normHi = std::max(normHi, v);
+			}
+		}
+	}
 
 	for (int i = 0; i < 64; i++) {
 		const float gateVal = gatePCV[sequencePage][i] > 0.1f ? 10.f : -10.f;
 		const bool written = hasRecordedDataPCV[sequencePage][i] > 0.1f;
 		// The same value the knob is showing, so the colour and the pointer always agree
 		const float value = *stepValuePtr(i);
-		// Where it sits on the knob's own range, 0 at the bottom and 1 at the top
-		const float t = math::clamp((value - rangeLo) / rangeSpan, 0.f, 1.f);
+		// Where it sits on the colour ramp, 0 at the bottom and 1 at the top
+		float t;
+		if (normalized && normFound) {
+			// Steps that all hold the same value sit at the top of the ramp, which is where
+			// the KWA Pitch 64 put a flat sequence too
+			t = (normHi > normLo) ? math::clamp((value - normLo) / (normHi - normLo), 0.f, 1.f) : 1.f;
+		}
+		else {
+			t = math::clamp((value - rangeLo) / rangeSpan, 0.f, 1.f);
+		}
 		//Display Mode Brightness
 		if(i <= (stepCountInt - 1)) {
 			switch(displayMode){
@@ -926,7 +961,10 @@ void SixtyFourGatePitchSeqKnobs::updateDisplay(){
 
 				//[2] - Voct display, red at the bottom of the range to green at the top
 				case 2:
-					red = 1.f - t;
+					// Red falls away faster than green rises. On a straight ramp everything just
+					// below the peak keeps enough red to read as lime, so the top of the range
+					// squashes the red channel instead.
+					red = (1.f - t) * (1.f - t);
 					green = t;
 					//blue should be blank unless no voct then we do dull blue (10%) to show that theres still a gate there
 					if (!written) {
@@ -1407,6 +1445,14 @@ void SixtyFourGatePitchSeqKnobsWidget::appendContextMenu(ui::Menu* menu) {
 		{"-10 to 10", "0 to 10"},
 		[=]() { return module->params[SixtyFourGatePitchSeqKnobs::KNOB_RANGE_PARAM].getValue() > 0.5f ? 1 : 0; },
 		[=](size_t index) { module->params[SixtyFourGatePitchSeqKnobs::KNOB_RANGE_PARAM].setValue(index == 1 ? 1.f : 0.f); }
+	));
+	menu->addChild(createIndexSubmenuItem("Colours",
+		{"Normalized", "Absolute"},
+		[=]() { return module->params[SixtyFourGatePitchSeqKnobs::COLOUR_MODE_PARAM].getValue() > 0.5f ? 1 : 0; },
+		[=](size_t index) {
+			module->params[SixtyFourGatePitchSeqKnobs::COLOUR_MODE_PARAM].setValue(index == 1 ? 1.f : 0.f);
+			module->shouldRefreshDisplay = true;
+		}
 	));
 
 	// One entry per source, in the same order as the Display knob. Each acts on every step of

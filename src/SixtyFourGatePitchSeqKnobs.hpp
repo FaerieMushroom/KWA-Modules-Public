@@ -14,6 +14,7 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 		DISPLAY_MODE_PARAM,
 		STEP_COUNT_PARAM,
 		KNOB_RANGE_PARAM,
+		COLOUR_MODE_PARAM,
 		NUM_PARAMS
 	};
 	enum InputIds {

@@ -11,8 +11,8 @@
       <stop offset="1" stop-color="#4c4c4c" />
     </linearGradient>
     <linearGradient id="rbface" x1="0" y1="0" x2="0" y2="3.3" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#666666" />
-      <stop offset="1" stop-color="#3a3a3a" />
+      <stop offset="0" stop-color="#101010" />
+      <stop offset="1" stop-color="#050505" />
     </linearGradient>
   <g>
   <circle cx="2.2" cy="2.38" r="2.1" fill="#000000" fill-opacity="0.3" />
