@@ -429,12 +429,31 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 									}
 								}
 								eocOutputPulse.trigger(1e-3f);
-							} else if (currentStep < 64) {
-								currentStep -= 1;
-							}
+} else if (currentStep < 64) {
+							currentStep -= 1;
 						}
-						break;
+					}
+					break;
+				case 3: {
+					// Random - a different step inside the range every clock, never the one
+					// that is already playing
+					if (currentStep < 64) {
+						const int range = std::max(1, std::min(stepCountInt, 64));
+						if (expanderSignalOneShot > 0.f) {
+							// Random has no cycle to run through, so one shot plays one note
+							currentStep = 64; // Stop
+						} else if (range > 1) {
+							// Offset in 1..range-1, so the landing step always differs
+							const int offset = 1 + (int)(random::uniform() * (range - 1));
+							currentStep = (currentStep + offset) % range;
+						} else {
+							// Only one step to play, and it is 0
+							currentStep = 0;
+						}
+					}
+					break;
 				}
+			}
 				//Pulse outputs if gate
 				currentStepFired = true;
 				if (currentStep < 64) {
@@ -510,6 +529,11 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 							currentWorkingStep = currentStep;
 						}
 					}
+					break;
+				case 3:
+					// Random has no predictable next step, so the gate writes onto the step
+					// that is playing rather than ahead of it
+					currentWorkingStep = currentStep;
 					break;
 			}
 		}

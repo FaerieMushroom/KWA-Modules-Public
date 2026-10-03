@@ -50,7 +50,7 @@ struct SixtyFourGatePitchSeqExpander : Module {
 		configButton(PASTE_BUTTON_PARAM, "Paste");
 
 		//knobs
-		configSwitch(PLAYHEAD_KNOB_PARAM, 1.f, 3.f, 1.f, "Step Mode",{"Ascend", "Descend", "Ping Pong"});
+		configSwitch(PLAYHEAD_KNOB_PARAM, 1.f, 4.f, 1.f, "Step Mode",{"Ascend", "Descend", "Ping Pong", "Random"});
 		getParamQuantity(PLAYHEAD_KNOB_PARAM)->snapEnabled = true;
 		configParam(PAGE_KNOB_PARAM, 1.f, 10.f, 1.f, "Page");
 		getParamQuantity(PAGE_KNOB_PARAM)->snapEnabled = true;
@@ -111,7 +111,7 @@ struct SixtyFourGatePitchSeqExpander : Module {
 			if(inputs[PLAYHEAD_CV_INPUT].isConnected()){
 				playheadVal = inputs[PLAYHEAD_CV_INPUT].getVoltage() / 3.3333;
 				playheadVal = playheadVal < 0.f ? 0.f : playheadVal;
-				playheadVal = playheadVal > 2.f ? 2.f : playheadVal;
+				playheadVal = playheadVal > 3.f ? 3.f : playheadVal;
 			} else{
 				playheadVal = (params[PLAYHEAD_KNOB_PARAM].getValue() - 1.f);
 			}
