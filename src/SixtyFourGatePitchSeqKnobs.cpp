@@ -267,6 +267,7 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		processCounter = 0;
 	}
 	processCounter++;
+	sampleCounter++;
 	outputs[GATE_OUTPUT].setChannels(1);
 	outputs[VOCT_OUTPUT].setChannels(1);
 	outputs[VELOCITY_OUTPUT].setChannels(1);
@@ -390,9 +391,37 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		}
 	}
 
+	// Clock. The playhead steps on the input clock, one pulse per step. The follower below
+	// runs four times per pulse and is what recording quantizes against, so a plain 1x clock
+	// still records against the same four subdivisions per step as before.
+	const bool clockRose = !resetTriggeredInternally
+		&& clockInputSchmitt.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 1.f);
+
+	// Time the input period, since that is what the follower has to divide
+	if (clockRose) {
+		if (lastClockSample >= 0) {
+			const int64_t period = sampleCounter - lastClockSample;
+			if (period > 0) {
+				clockPeriodSamples = period;
+				// Re-phase on every pulse so the follower cannot drift against the input
+				followerCounter = (int)std::max<int64_t>(1, period / 4);
+			}
+		}
+		lastClockSample = sampleCounter;
+	}
+
+	// The follower only earns its keep when a gate is patched, because the gate is the only
+	// thing that can ever record. With nothing patched the substep is never read.
+	if (inputs[GATE_INPUT].isConnected() && clockPeriodSamples > 0 && currentStep < 64) {
+		if (--followerCounter <= 0) {
+			followerCounter = (int)std::max<int64_t>(1, clockPeriodSamples / 4);
+			// Four subdivisions per step, wrapping so the working step never sees a fourth
+			currentSubstep = (currentSubstep + 1) & 3;
+		}
+	}
+
 	// Clock
-	if (!resetTriggeredInternally && clockInputSchmitt.process(inputs[CLOCK_INPUT].getVoltage(),0.1f, 1.f)) {
-		currentSubstep += 1;
+	if (clockRose) {
 		// Don't Increment edit steps if its -1 to prevent random deselecting of edit selection
 		if (clockStepsSinceLastEdit > -1){
 			clockStepsSinceLastEdit++;
@@ -420,26 +449,58 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		}
 		//Substep loop
 		const int playheadModeInt = std::floor(expanderSignalPlayhead);
-		if (currentSubstep >= 4){
-			engine.hasTriggerOutputPulsedThisStep = false;
-			if(is_baby ? expanderSignalPlay > 0.f : true) {
-				switch(playheadModeInt){
-					default:
+		engine.hasTriggerOutputPulsedThisStep = false;
+		if(is_baby ? expanderSignalPlay > 0.f : true) {
+			switch(playheadModeInt){
+				default:
+					if (currentStep >= stepCountInt - 1) {
+						if (currentStep < 64) {
+							if (expanderSignalOneShot > 0.f) {
+								currentStep = 64; // Stop
+							} else {
+								currentStep = 0;
+							}
+							eocOutputPulse.trigger(1e-3f);
+						}
+					}
+					else if (currentStep < 64) {
+						currentStep += 1;
+					}
+					break;
+				case 1:
+					if (currentStep < 64 && currentStep > stepCountInt - 1) {
+						//prevent being above max steps
+						currentStep = stepCountInt - 1;
+					}
+					if (currentStep < 64 && currentStep <= 0) {
+						if (expanderSignalOneShot > 0.f) {
+							currentStep = 64; // Stop
+						} else {
+							currentStep = stepCountInt - 1;
+						}
+						eocOutputPulse.trigger(1e-3f);
+					}
+					else if (currentStep < 64) {
+						currentStep -= 1;
+					}
+					break;
+				case 2:
+					if(pingPongDir == 1){
 						if (currentStep >= stepCountInt - 1) {
 							if (currentStep < 64) {
-								if (expanderSignalOneShot > 0.f) {
-									currentStep = 64; // Stop
+								if (stepCountInt > 1) {
+									currentStep -= 1;
+									pingPongDir = 0;
 								} else {
-									currentStep = 0;
+									pingPongDir = 0;
+									eocOutputPulse.trigger(1e-3f);
 								}
-								eocOutputPulse.trigger(1e-3f);
 							}
 						}
 						else if (currentStep < 64) {
 							currentStep += 1;
 						}
-						break;
-					case 1:
+					} else {
 						if (currentStep < 64 && currentStep > stepCountInt - 1) {
 							//prevent being above max steps
 							currentStep = stepCountInt - 1;
@@ -447,118 +508,84 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 						if (currentStep < 64 && currentStep <= 0) {
 							if (expanderSignalOneShot > 0.f) {
 								currentStep = 64; // Stop
+								pingPongDir = 1;
 							} else {
-								currentStep = stepCountInt - 1;
-							}
-							eocOutputPulse.trigger(1e-3f);
-						}
-						else if (currentStep < 64) {
-							currentStep -= 1;
-						}
-						break;
-					case 2:
-						if(pingPongDir == 1){
-							if (currentStep >= stepCountInt - 1) {
-								if (currentStep < 64) {
-									if (stepCountInt > 1) {
-										currentStep -= 1;
-										pingPongDir = 0;
-									} else {
-										pingPongDir = 0;
-										eocOutputPulse.trigger(1e-3f);
-									}
-								}
-							}
-							else if (currentStep < 64) {
-								currentStep += 1;
-							}
-						} else {
-							if (currentStep < 64 && currentStep > stepCountInt - 1) {
-								//prevent being above max steps
-								currentStep = stepCountInt - 1;
-							}
-							if (currentStep < 64 && currentStep <= 0) {
-								if (expanderSignalOneShot > 0.f) {
-									currentStep = 64; // Stop
+								if (stepCountInt > 1) {
+									currentStep = 1;
 									pingPongDir = 1;
 								} else {
-									if (stepCountInt > 1) {
-										currentStep = 1;
-										pingPongDir = 1;
-									} else {
-										currentStep = 0;
-										pingPongDir = 1;
-									}
-								}
-								eocOutputPulse.trigger(1e-3f);
-} else if (currentStep < 64) {
-							currentStep -= 1;
-						}
-					}
-					break;
-				case 3: {
-					// Random - a different step inside the range every clock, never the one
-					// that is already playing
-					if (currentStep < 64) {
-						const int range = std::max(1, std::min(stepCountInt, 64));
-						if (expanderSignalOneShot > 0.f) {
-							// Random has no cycle to run through, so one shot plays one note
-							currentStep = 64; // Stop
-						} else if (range > 1) {
-							// Offset in 1..range-1, so the landing step always differs
-							const int offset = 1 + (int)(random::uniform() * (range - 1));
-							currentStep = (currentStep + offset) % range;
-						} else {
-							// Only one step to play, and it is 0
-							currentStep = 0;
-						}
-					}
-					break;
-				}
-				case 4:
-				case 5: {
-					// Vertical modes walk a column instead of a row. Only the steps the Steps
-					// knob has switched on are ever visited, so this reorders the active range
-					// rather than reaching outside it.
-					if (currentStep < 64) {
-						const int range = std::max(1, std::min(stepCountInt, 64));
-						if (expanderSignalOneShot > 0.f) {
-							currentStep = 64; // Stop
-						} else {
-							// Which slot of the order the playhead sits in, -1 when it is not
-							// in the order at all, which is what lowering the Steps knob under
-							// the playhead leaves behind
-							int p = -1;
-							for (int i = 0; i < range; i++) {
-								if (verticalStepAt(i, playheadModeInt, range) == currentStep) {
-									p = i;
-									break;
+									currentStep = 0;
+									pingPongDir = 1;
 								}
 							}
-							const bool wrapped = p == range - 1;
-							p = (p + 1 + range) % range;
-							currentStep = verticalStepAt(p, playheadModeInt, range);
-							if (wrapped)
-								eocOutputPulse.trigger(1e-3f);
-						}
+							eocOutputPulse.trigger(1e-3f);
+} else if (currentStep < 64) {
+						currentStep -= 1;
 					}
-					break;
 				}
-			}
-				//Pulse outputs if gate
-				currentStepFired = true;
+				break;
+			case 3: {
+				// Random - a different step inside the range every clock, never the one
+				// that is already playing
 				if (currentStep < 64) {
-					if(!engine.hasTriggerOutputPulsedThisStep){
-						engine.hasTriggerOutputPulsedThisStep = true;
-						// Rolled once per step, then reused by the data write further down
-						if(stepFires(currentStep))
-							engine.triggerOutputPulse.trigger(1e-3f);
-						else
-							currentStepFired = false;
+					const int range = std::max(1, std::min(stepCountInt, 64));
+					if (expanderSignalOneShot > 0.f) {
+						// Random has no cycle to run through, so one shot plays one note
+						currentStep = 64; // Stop
+					} else if (range > 1) {
+						// Offset in 1..range-1, so the landing step always differs
+						const int offset = 1 + (int)(random::uniform() * (range - 1));
+						currentStep = (currentStep + offset) % range;
+					} else {
+						// Only one step to play, and it is 0
+						currentStep = 0;
 					}
 				}
-				currentSubstep = 0;
+				break;
 			}
+			case 4:
+			case 5: {
+				// Vertical modes walk a column instead of a row. Only the steps the Steps
+				// knob has switched on are ever visited, so this reorders the active range
+				// rather than reaching outside it.
+				if (currentStep < 64) {
+					const int range = std::max(1, std::min(stepCountInt, 64));
+					if (expanderSignalOneShot > 0.f) {
+						currentStep = 64; // Stop
+					} else {
+						// Which slot of the order the playhead sits in, -1 when it is not
+						// in the order at all, which is what lowering the Steps knob under
+						// the playhead leaves behind
+						int p = -1;
+						for (int i = 0; i < range; i++) {
+							if (verticalStepAt(i, playheadModeInt, range) == currentStep) {
+								p = i;
+								break;
+							}
+						}
+						const bool wrapped = p == range - 1;
+						p = (p + 1 + range) % range;
+						currentStep = verticalStepAt(p, playheadModeInt, range);
+						if (wrapped)
+							eocOutputPulse.trigger(1e-3f);
+					}
+				}
+				break;
+			}
+		}
+			//Pulse outputs if gate
+			currentStepFired = true;
+			if (currentStep < 64) {
+				if(!engine.hasTriggerOutputPulsedThisStep){
+					engine.hasTriggerOutputPulsedThisStep = true;
+					// Rolled once per step, then reused by the data write further down
+					if(stepFires(currentStep))
+						engine.triggerOutputPulse.trigger(1e-3f);
+					else
+						currentStepFired = false;
+				}
+			}
+			currentSubstep = 0;
 			clockOutputPulse.trigger(1e-3f);
 		}
 		// Quantize substep to a working step
@@ -1192,7 +1219,6 @@ void SixtyFourGatePitchSeqKnobs::onRandomize(const RandomizeEvent& e){
 
 void SixtyFourGatePitchSeqKnobs::onReset(const ResetEvent& e){
 	Module::onReset(e);
-	Module::onReset(e);
 	const int pD = 10;
     const int vD = 64;
 	for (int p = 0; p < pD; p++) {
@@ -1210,6 +1236,10 @@ void SixtyFourGatePitchSeqKnobs::onReset(const ResetEvent& e){
 	for (int i = 0; i < 64; i++) {
 		editModeSelectedGates[i] = false;
 	}
+	// Forget the clock timing so the follower measures the incoming clock afresh
+	lastClockSample = -1;
+	clockPeriodSamples = 0;
+	followerCounter = 0;
 	syncKnobs();
 	shouldRefreshDisplay = true;
 	invalidateStepRolls();

@@ -78,6 +78,13 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 	int sequencePage = 0;
 	int stepCountInt = 0;
 	int pingPongDir = 1;
+	// Internal follower clock. Stepping runs off the input clock, one pulse per step, and
+	// this supplies the four subdivisions per step that recording quantizes against, so a
+	// 1x clock can be fed in. clockPeriodSamples is measured between input clock rises.
+	int64_t sampleCounter = 0;
+	int64_t lastClockSample = -1;
+	int64_t clockPeriodSamples = 0;
+	int followerCounter = 0;
 	// Probability roll result for the step the playhead is on, for the playhead light
 	bool currentStepFired = true;
 
