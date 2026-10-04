@@ -148,8 +148,10 @@ bool SixtyFourGatePitchSeqKnobs::stepFires(int step) {
 		return false;
 	if (engine.rolledStep != step) {
 		engine.rolledStep = step;
-		// A step the user clicked off never fires, whatever its probability says
-		engine.rolledResult = gatePCV[sequencePage][step] > 0.1f && rollTrigger(step);
+		// Probability is rolled first, then the step also has to be switched on. A step has
+		// to clear both before anything about it is allowed to change.
+		const bool passedProbability = rollTrigger(step);
+		engine.rolledResult = passedProbability && gatePCV[sequencePage][step] > 0.1f;
 	}
 	return engine.rolledResult;
 }
@@ -693,27 +695,32 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		// in edit mode
 		} else if (!gateModeSelected)
 		{
-			// Iterate the step knobs
+			// Iterate the step knobs. Each selected step is checked on its own, so one that
+			// is switched off, or that lost its probability roll, keeps exactly what it had
+			// rather than being dragged along by the step the playhead happens to be on.
 			for (int i = 0; i < 64; i++) {
 				// If step is selected with edit mode
-				if(editModeSelectedGates[i]){
-					if(editCount == 0) {
-						// Subloop neccesary because edit count increments
-						for (int j = 0; j < 64; j++) {
-							if(editModeSelectedGates[j]){
-								clearNoteParams(j);
-							}
+				if(!editModeSelectedGates[i])
+					continue;
+				if(!stepFires(i))
+					continue;
+				if(editCount == 0) {
+					// Subloop neccesary because edit count increments. Only the steps that
+					// are actually going to be written get cleared.
+					for (int j = 0; j < 64; j++) {
+						if(editModeSelectedGates[j] && stepFires(j)){
+							clearNoteParams(j);
 						}
 					}
-					// Edit Data
-					gatePCV[sequencePage][i] = 10.f;
-					hasRecordedDataPCV[sequencePage][i] = 10.f;
-					voctPCV[sequencePage][i] = inputs[VOCT_INPUT].getVoltage();
-					velocityPCV[sequencePage][i] = inputs[VELOCITY_INPUT].getVoltage();
-					// Increment edit count, To reset note params only once per edit
-					editCount++;
-					syncKnob(i);
 				}
+				// Edit Data
+				gatePCV[sequencePage][i] = 10.f;
+				hasRecordedDataPCV[sequencePage][i] = 10.f;
+				voctPCV[sequencePage][i] = inputs[VOCT_INPUT].getVoltage();
+				velocityPCV[sequencePage][i] = inputs[VELOCITY_INPUT].getVoltage();
+				// Increment edit count, To reset note params only once per edit
+				editCount++;
+				syncKnob(i);
 			}
 			// Start counting up clock steps again
 			clockStepsSinceLastEdit = 0;
