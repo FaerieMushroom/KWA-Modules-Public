@@ -15,6 +15,7 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 		STEP_COUNT_PARAM,
 		KNOB_RANGE_PARAM,
 		COLOUR_MODE_PARAM,
+		KNOB_PREVIEW_PARAM,
 		NUM_PARAMS
 	};
 	enum InputIds {
@@ -85,6 +86,9 @@ struct SixtyFourGatePitchSeqKnobs : Module {
 	int64_t lastClockSample = -1;
 	int64_t clockPeriodSamples = 0;
 	int followerCounter = 0;
+	// While a step knob is being dragged its value is played as well as shown, so a pitch
+	// can be heard while it is set. -1 when no knob is being auditioned.
+	int auditionStep = -1;
 	// Probability roll result for the step the playhead is on, for the playhead light
 	bool currentStepFired = true;
 

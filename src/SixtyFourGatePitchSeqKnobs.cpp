@@ -84,6 +84,9 @@ SixtyFourGatePitchSeqKnobs::SixtyFourGatePitchSeqKnobs() {
 	// Normalised by default, like the KWA Pitch 64. Absolute is the alternative.
 	configSwitch(COLOUR_MODE_PARAM, 0.f, 1.f, 0.f, "Colours", {"Normalized", "Absolute"});
 	getParamQuantity(COLOUR_MODE_PARAM)->randomizeEnabled = false;
+	// Holding a step knob plays it. On by default, since that is the point of the knobs.
+	configSwitch(KNOB_PREVIEW_PARAM, 0.f, 1.f, 1.f, "Knob Previews", {"Off", "On"});
+	getParamQuantity(KNOB_PREVIEW_PARAM)->randomizeEnabled = false;
 
 	//inputs
 	configInput(CLOCK_INPUT, "Clock");
@@ -327,9 +330,13 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 		stepCountInt = params[STEP_COUNT_PARAM].getValue();
 	}
 
-	// Playback other voltages
+	// Playback other voltages. Only a step that actually fired may move the outputs, so a step
+	// that is switched off or lost its probability roll leaves the last triggered step's pitch
+	// and velocity sounding rather than jumping to a step that never played.
 	if (currentStep < 64) {
-		if(hasRecordedDataPCV[sequencePage][currentStep] > 0 && !(inputs[GATE_INPUT].getVoltage() > 0)){
+		if(currentStepFired
+			&& hasRecordedDataPCV[sequencePage][currentStep] > 0
+			&& !(inputs[GATE_INPUT].getVoltage() > 0)){
 			outputs[VOCT_OUTPUT].setVoltage(voctPCV[sequencePage][currentStep]);
 			outputs[VELOCITY_OUTPUT].setVoltage(velocityPCV[sequencePage][currentStep]);
 		}
@@ -736,6 +743,31 @@ void SixtyFourGatePitchSeqKnobs::process(const ProcessArgs& args) {
 	outputs[RESET_OUTPUT].setVoltage(inputs[RESET_INPUT].getVoltage());
 	outputs[EOC_OUTPUT].setVoltage(eocOutputPulse.process(args.sampleTime) ? 10.f : 0.f);
 	outputs[CLOCK_OUTPUT].setVoltage(clockOutputPulse.process(args.sampleTime) ? 10.f : 0.f);
+
+	// Knob audition, last so it wins over playback and the trigger pulse. Holding a step
+	// knob plays what that step is set to, which is the point of the knobs over buttons.
+	// The toggle is read last so it only costs a param lookup while a knob is held.
+	if (auditionStep >= 0 && auditionStep < 64 && params[KNOB_PREVIEW_PARAM].getValue() > 0.5f) {
+		const int source = getDataSource();
+		// Only the sources that mean something audible. Probability and the data buses are
+		// not pitches, so there is nothing to prehear.
+		if (source == 2 || source == 3) {
+			// Fall back to full velocity so an unrecorded step still sounds
+			float vel = velocityPCV[sequencePage][auditionStep];
+			if (vel <= 0.f)
+				vel = 1.f;
+			if (source == 3) {
+				// Turning the velocity knob plays the step's own pitch at the new velocity
+				outputs[VOCT_OUTPUT].setVoltage(voctPCV[sequencePage][auditionStep]);
+				outputs[VELOCITY_OUTPUT].setVoltage(*stepValuePtr(auditionStep));
+			}
+			else {
+				outputs[VOCT_OUTPUT].setVoltage(*stepValuePtr(auditionStep));
+				outputs[VELOCITY_OUTPUT].setVoltage(vel);
+			}
+			outputs[GATE_OUTPUT].setVoltage(10.f);
+		}
+	}
 
 }
 
@@ -1307,6 +1339,20 @@ struct StepKnob : app::SvgKnob {
 		if (m)
 			drawStepShade(args, box.size, m->knobShade[stepIndex]);
 	}
+	/** While the knob is held, ask the module to play what it is set to. Drag events only
+	fire for the mouse, so keyboard nudges on a focused knob are not previewed. */
+	void onDragStart(const DragStartEvent& e) override {
+		app::SvgKnob::onDragStart(e);
+		SixtyFourGatePitchSeqKnobs* m = dynamic_cast<SixtyFourGatePitchSeqKnobs*>(this->module);
+		if (m && stepIndex >= 0)
+			m->auditionStep = stepIndex;
+	}
+	void onDragEnd(const DragEndEvent& e) override {
+		app::SvgKnob::onDragEnd(e);
+		SixtyFourGatePitchSeqKnobs* m = dynamic_cast<SixtyFourGatePitchSeqKnobs*>(this->module);
+		if (m && m->auditionStep == stepIndex)
+			m->auditionStep = -1;
+	}
 };
 
 /** Half size version of the KWA Control 8 rubber step button. Momentary, like the
@@ -1491,6 +1537,17 @@ void SixtyFourGatePitchSeqKnobsWidget::appendContextMenu(ui::Menu* menu) {
 		[=](size_t index) {
 			module->params[SixtyFourGatePitchSeqKnobs::COLOUR_MODE_PARAM].setValue(index == 1 ? 1.f : 0.f);
 			module->shouldRefreshDisplay = true;
+		}
+	));
+
+	menu->addChild(createCheckMenuItem("Enable Knob Previews", "",
+		[=]() { return module->params[SixtyFourGatePitchSeqKnobs::KNOB_PREVIEW_PARAM].getValue() > 0.5f; },
+		[=]() {
+			module->params[SixtyFourGatePitchSeqKnobs::KNOB_PREVIEW_PARAM].setValue(
+				module->params[SixtyFourGatePitchSeqKnobs::KNOB_PREVIEW_PARAM].getValue() > 0.5f ? 0.f : 1.f);
+			// Stop any preview that is currently sounding
+			if (module->auditionStep >= 0 && module->params[SixtyFourGatePitchSeqKnobs::KNOB_PREVIEW_PARAM].getValue() < 0.5f)
+				module->auditionStep = -1;
 		}
 	));
 
